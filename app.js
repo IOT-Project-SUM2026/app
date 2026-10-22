@@ -11,6 +11,11 @@ let recordingTimer;
 const stateLabel = document.getElementById("stateLabel");
 const buttonTitle = document.getElementById("buttonTitle");
 const recordHint = document.getElementById("recordHint");
+const commandReview = document.getElementById("commandReview");
+const reviewCommand = document.getElementById("reviewCommand");
+const confirmCommandButton = document.getElementById("confirmCommand");
+const cancelCommandButton = document.getElementById("cancelCommand");
+let pendingCommand = null;
 function showState(state, message) {
   document.body.dataset.state = state;
   statusText.textContent = message;
@@ -19,6 +24,7 @@ function showState(state, message) {
     opening: ["Microphone", "Allow microphone access", "Keep holding the button to start recording."],
     recording: ["Recording", "Listening…", "Release to send · Up to 30 seconds."],
     processing: ["Processing", "Understanding your request", "This may take a moment."],
+    confirm: ["Review command", "Please check", "Choose Yes to send this command or No to cancel."],
     waiting: ["Pending", "Waiting for your display", "Your request has been sent."],
     success: ["Complete", "Done", "Hold the button to make another request."],
     error: ["Error", "Request unsuccessful", "Check the message below before trying again."],
@@ -29,7 +35,7 @@ function showState(state, message) {
 }
 
 async function startRecording() {
-  if (busy || requestingMicrophone || recorder?.state === "recording") return;
+  if (busy || pendingCommand || requestingMicrophone || recorder?.state === "recording") return;
   if (!navigator.onLine) {
     showState("error", "You’re offline. Connect to the internet to record a command.");
     return;
@@ -63,7 +69,7 @@ async function startRecording() {
       recordButton.disabled = true;
       await sendAudio(new Blob(chunks, { type: current.mimeType }));
       busy = false;
-      recordButton.disabled = false;
+      recordButton.disabled = Boolean(pendingCommand);
     };
     current.start();
     recordingTimer = setTimeout(stopRecording, 30000);
@@ -96,8 +102,48 @@ async function sendAudio(blob) {
       method: "POST", body: form, signal: AbortSignal.timeout(90000)
     });
     const command = await response.json();
-    if (!response.ok) throw new Error(command.error || "Could not send command.");
-    showState("waiting", `${command.type === "remove" ? "Removing" : "Adding"} ${command.item}…`);
+    if (!response.ok) throw new Error(command.error || "Could not understand the command.");
+    const listName = command.list === "todo" ? "to-do list" : "shopping list";
+    pendingCommand = command;
+    const action = command.type === "remove" ? "Remove" : "Add";
+    const relation = command.type === "remove" ? "from" : "to";
+    reviewCommand.textContent = `${action} “${command.item}” ${relation} your ${listName}?`;
+    commandReview.hidden = false;
+    recordButton.disabled = true;
+    showState("confirm", "Nothing has been sent to your display yet.");
+    confirmCommandButton.focus();
+  } catch (error) {
+    showState(error.name === "TimeoutError" ? "timeout" : "error", error.name === "TimeoutError"
+      ? "Request timed out. Check your list before trying again."
+      : error.message);
+  }
+}
+
+async function confirmCommand() {
+  if (!pendingCommand || busy) return;
+  busy = true;
+  confirmCommandButton.disabled = true;
+  cancelCommandButton.disabled = true;
+  const draft = pendingCommand;
+  showState("processing", "Sending your confirmed command…");
+  try {
+    const response = await fetch(`${apiBase}/api/confirm-command`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(draft),
+      signal: AbortSignal.timeout(15000)
+    });
+    const command = await response.json();
+    if (!response.ok) throw new Error(command.error || "Could not send the command.");
+
+    pendingCommand = null;
+    commandReview.hidden = true;
+    confirmCommandButton.disabled = false;
+    cancelCommandButton.disabled = false;
+    recordButton.disabled = true;
+    const listName = command.list === "todo" ? "to-do list" : "shopping list";
+    const removing = command.type === "remove";
+    showState("waiting", `${removing ? "Removing" : "Adding"} ${command.item} ${removing ? "from" : "to"} your ${listName}…`);
     const confirmation = await fetch(`${apiBase}/api/command-status/${command.runningCount}`, {
       signal: AbortSignal.timeout(65000)
     });
@@ -107,17 +153,40 @@ async function sendAudio(blob) {
       showState("timeout", "The display hasn’t confirmed yet. Check your list before trying again.");
     } else {
       const itemName = command.item.charAt(0).toUpperCase() + command.item.slice(1);
-      const action = command.type === "remove" ? "removed" : "added";
+      const action = removing ? "removed from" : "added to";
       showState(result.status.success ? "success" : "error", result.status.success
-        ? `${itemName} ${action} successfully`
+        ? `${itemName} ${action} your ${listName}`
         : "Your display couldn’t complete this request. Check your list.");
     }
   } catch (error) {
-    showState(error.name === "TimeoutError" ? "timeout" : "error", error.name === "TimeoutError"
-      ? "Request timed out. Check your list before trying again."
-      : error.message);
+    if (pendingCommand) {
+      pendingCommand = null;
+      commandReview.hidden = true;
+      showState("error", "Could not confirm whether the command was sent. Check your list before trying again.");
+    } else {
+      showState(error.name === "TimeoutError" ? "timeout" : "error", error.name === "TimeoutError"
+        ? "Request timed out. Check your list before trying again."
+        : error.message);
+    }
+  } finally {
+    busy = false;
+    confirmCommandButton.disabled = false;
+    cancelCommandButton.disabled = false;
+    recordButton.disabled = Boolean(pendingCommand);
   }
 }
+
+function cancelCommand() {
+  if (!pendingCommand || busy) return;
+  pendingCommand = null;
+  commandReview.hidden = true;
+  showState("idle", "Canceled. Nothing was sent to your display.");
+  recordButton.disabled = false;
+  recordButton.focus();
+}
+
+confirmCommandButton.addEventListener("click", confirmCommand);
+cancelCommandButton.addEventListener("click", cancelCommand);
 
 recordButton.addEventListener("pointerdown", (event) => {
   if (event.button !== 0 || busy || requestingMicrophone) return;

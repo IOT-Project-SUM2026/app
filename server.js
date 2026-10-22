@@ -13,6 +13,7 @@ dotenv.config();
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || (process.env.NODE_ENV === "production" ? "0.0.0.0" : "127.0.0.1");
+app.use(express.json({ limit: "10kb" }));
 for (const name of ["GEMINI_API_KEY", "FIREBASE_DATABASE_URL"]) {
   if (!process.env[name]) throw new Error(`Missing ${name}`);
 }
@@ -113,14 +114,24 @@ app.post(
                 text: `
 Listen to this voice command.
 
-Extract the action, item and list.
+Extract the action, item and destination list ONLY when the user clearly says all three.
+The user must explicitly say "add" or "remove" and explicitly name one of the supported lists.
+Never infer an action or list from the item, context, or a typical usage pattern.
+For example, if the user says only "Chico", return action null, item "Chico", list null.
+Do not turn a bare item name into an add command.
+Choose "shopping" when the user says shopping list or groceries.
+Choose "todo" when the user says to-do list, task list, or something they need to do.
+For example, "add milk to my shopping list" means action "add", item "milk", list "shopping".
+"Add call the dentist to my to-do list" means action "add", item "call the dentist", list "todo".
+Do not guess between the two lists. If the user names any other list, return that list name
+as the "list" value exactly as heard; the command will be rejected and the user can try again.
 
 Return ONLY valid JSON in this exact format:
 
 {
-  "action": "add" or "remove",
+  "action": "add", "remove", or null,
   "item": "<item name>",
-  "list": "shopping" or "todo"
+  "list": "shopping", "todo", the unsupported list name, or null
 }
 
 Do not return markdown.
@@ -144,17 +155,19 @@ Do not return explanations.
         .replace(/```/g, "")
         .trim();
 
-      let command;
+      let parsedCommand;
       try {
-        command = validateCommand(JSON.parse(cleanedText));
+        parsedCommand = JSON.parse(cleanedText);
       } catch {
         return res.status(422).json({ error: "Could not understand a valid command. Please try again." });
       }
-      const result = await database.ref("command").transaction(
-        (current) => nextCommand(current, command), undefined, false
-      );
-      if (!result.committed) throw new Error("Command was not saved.");
-      res.json(result.snapshot.val());
+      let command;
+      try {
+        command = validateCommand(parsedCommand);
+      } catch (error) {
+        return res.status(422).json({ error: error.message });
+      }
+      res.json(command);
     } catch (error) {
       console.error("Voice command error:", {
         name: error.name,
@@ -164,11 +177,37 @@ Do not return explanations.
       });
 
       res.status(500).json({
-        error: "Could not process or send the command. Check Firebase before retrying."
+        error: "Could not understand the voice command. Please try again."
       });
     }
   }
 );
+
+app.post("/api/confirm-command", async (req, res) => {
+  let command;
+  try {
+    command = validateCommand(req.body);
+  } catch (error) {
+    return res.status(422).json({ error: error.message });
+  }
+
+  try {
+    const result = await database.ref("command").transaction(
+      (current) => nextCommand(current, command), undefined, false
+    );
+    if (!result.committed) throw new Error("Command was not saved.");
+    res.json(result.snapshot.val());
+  } catch (error) {
+    console.error("Confirmed command error:", {
+      name: error.name,
+      code: error.code,
+      message: error.message
+    });
+    res.status(500).json({
+      error: "Could not send the command. Check your list before trying again."
+    });
+  }
+});
 
 app.get("/api/command-status/:count", async (req, res) => {
   const count = Number(req.params.count);
@@ -187,6 +226,12 @@ app.get("/api/command-status/:count", async (req, res) => {
 });
 
 app.use((error, _req, res, _next) => {
+  if (error.type === "entity.parse.failed") {
+    return res.status(400).json({ error: "Invalid JSON request." });
+  }
+  if (error.type === "entity.too.large") {
+    return res.status(413).json({ error: "JSON request is too large." });
+  }
   res.status(error.code === "LIMIT_FILE_SIZE" ? 413 : 400).json({ error: "Audio upload failed. Try a shorter recording." });
 });
 

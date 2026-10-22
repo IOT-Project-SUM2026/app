@@ -15,10 +15,20 @@ function fakeRef() {
 test("validates commands before mapping them to the device format", () => {
   assert.deepEqual(validateCommand({ action: "add", item: " tomato ", list: "shopping" }),
     { type: "add", item: "tomato", list: "shopping" });
+  assert.deepEqual(validateCommand({ action: "add", item: "call the dentist", list: "todo" }),
+    { type: "add", item: "call the dentist", list: "todo" });
+  assert.deepEqual(validateCommand({ type: "remove", item: "milk", list: "shopping" }),
+    { type: "remove", item: "milk", list: "shopping" });
   for (const value of [null, {}, { action: "erase", item: "milk", list: "shopping" },
     { action: "add", item: " ", list: "shopping" }, { action: "add", item: "milk", list: "other" }]) {
     assert.throws(() => validateCommand(value));
   }
+  assert.throws(() => validateCommand({ action: "add", item: "temperature", list: "temp" }),
+    /shopping list or to-do list/);
+  assert.throws(() => validateCommand({ action: null, item: "Chico", list: null }),
+    /whether to add or remove/);
+  assert.throws(() => validateCommand({ action: "add", item: "Chico", list: null }),
+    /shopping list or to-do list/);
 });
 
 test("identical commands receive increasing numbers; invalid counters are rejected", () => {

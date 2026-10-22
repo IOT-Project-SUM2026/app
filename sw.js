@@ -1,4 +1,4 @@
-const CACHE = "smart-display-shell-v2";
+const CACHE = "smart-display-shell-v3";
 const SHELL = ["/", "/style.css", "/app.js", "/pwa.js", "/manifest.webmanifest",
   "/icons/icon-180.png", "/icons/icon-192.png", "/icons/icon-512.png"];
 

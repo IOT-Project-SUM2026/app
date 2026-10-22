@@ -33,6 +33,14 @@
     </div>
     <h1 id="buttonTitle">Hold to speak</h1>
     <p id="recordHint">Add or remove an item with your voice.<br>Release to send.</p>
+    <section id="commandReview" class="command-review" aria-labelledby="reviewTitle" hidden>
+      <h2 id="reviewTitle">Send this command?</h2>
+      <p id="reviewCommand"></p>
+      <div class="review-actions">
+        <button id="confirmCommand" class="confirm-button">Yes, send it</button>
+        <button id="cancelCommand" class="cancel-button">No, cancel</button>
+      </div>
+    </section>
     <div class="feedback" role="status" aria-live="polite" aria-atomic="true"><p id="status"></p></div>
     <p class="keyboard-hint">You can also hold <kbd>Space</kbd> when the button is focused.</p>
   </main>

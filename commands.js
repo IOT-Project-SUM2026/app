@@ -1,10 +1,18 @@
 export function validateCommand(value) {
-  if (!value || !["add", "remove"].includes(value.action) ||
-      !["shopping", "todo"].includes(value.list) ||
-      typeof value.item !== "string" || !value.item.trim() || value.item.length > 200) {
+  if (!value || typeof value !== "object") {
     throw new Error("Could not understand a valid command. Please try again.");
   }
-  return { type: value.action, item: value.item.trim(), list: value.list };
+  const type = value.action ?? value.type;
+  if (!["add", "remove"].includes(type)) {
+    throw new Error("Please say whether to add or remove the item, and name the shopping or to-do list.");
+  }
+  if (!["shopping", "todo"].includes(value.list)) {
+    throw new Error("I can only use the shopping list or to-do list. Please say which one.");
+  }
+  if (typeof value.item !== "string" || !value.item.trim() || value.item.length > 200) {
+    throw new Error("Could not understand a valid command. Please try again.");
+  }
+  return { type, item: value.item.trim(), list: value.list };
 }
 
 export function nextCommand(current, command) {
