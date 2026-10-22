@@ -16,6 +16,8 @@ const reviewCommand = document.getElementById("reviewCommand");
 const confirmCommandButton = document.getElementById("confirmCommand");
 const cancelCommandButton = document.getElementById("cancelCommand");
 let pendingCommand = null;
+// Wake the API (cold start) and open the connection while the user reads the page.
+fetch(`${apiBase}/api/health`, { cache: "no-store" }).catch(() => {});
 function showState(state, message) {
   document.body.dataset.state = state;
   statusText.textContent = message;

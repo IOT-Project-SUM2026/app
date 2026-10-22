@@ -1,4 +1,4 @@
-const CACHE = "smart-display-shell-v3";
+const CACHE = "smart-display-shell-v4";
 const SHELL = ["/", "/style.css", "/app.js", "/pwa.js", "/manifest.webmanifest",
   "/icons/icon-180.png", "/icons/icon-192.png", "/icons/icon-512.png"];
 
@@ -20,14 +20,18 @@ self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
   if (event.request.method !== "GET" || url.origin !== self.location.origin ||
       !SHELL.includes(url.pathname)) return;
+  // Cache first for instant loads; refresh the cache in the background.
   event.respondWith((async () => {
     const cache = await caches.open(CACHE);
-    try {
-      const response = await fetch(event.request);
+    const cached = await cache.match(url.pathname);
+    const refresh = fetch(event.request).then(async (response) => {
       if (response.ok) await cache.put(url.pathname, response.clone());
       return response;
-    } catch {
-      return (await cache.match(url.pathname)) || Response.error();
+    });
+    if (cached) {
+      event.waitUntil(refresh.catch(() => {}));
+      return cached;
     }
+    return refresh.catch(() => Response.error());
   })());
 });
