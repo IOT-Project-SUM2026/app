@@ -53,28 +53,23 @@ Run `npm test` for local protocol tests. `node check-firebase.js` tests real Fir
 access using a temporary `_integrationChecks` child, then removes that child.
 It does not write to the real `/command` or `/status` paths.
 
-## Deploy (Netlify frontend + Railway backend)
+## Deploy (single Railway service: app + server together)
 
 Do not use your Mac path for `GOOGLE_APPLICATION_CREDENTIALS` in production.
 Never commit `.env` or the Firebase JSON file.
 
-**Railway (API):** set the root to this folder, start with `npm start`, and add:
+`server.js` serves the web app (HTML/JS/CSS/PWA files) and the `/api/*` endpoints from
+the same address, so one deployment is the whole system and no CORS setup is needed.
+
+**Railway:** set the root to this folder, start with `npm start`, and add:
 
 - `NODE_ENV=production`
 - `GEMINI_API_KEY`
 - `FIREBASE_DATABASE_URL`
 - `FIREBASE_SERVICE_ACCOUNT` — paste the **full JSON** from the Desktop service-account file (not the file path)
-- `CORS_ORIGIN` — your Netlify URL, for example `https://your-site.netlify.app`
 
-Do not set `GOOGLE_APPLICATION_CREDENTIALS` on Railway. After deploy, copy the
-public URL (`https://….up.railway.app`) into `index.html` (`window.API_BASE`).
-
-**Netlify (PWA):** connect this repo. `netlify.toml` copies only static files into
-`dist` (not `server.js` or secrets). After the site exists, set Railway
-`CORS_ORIGIN` to that HTTPS URL.
-
-Do not proxy `/api/*` through Netlify; voice + display confirmation can exceed
-Netlify's proxy timeout. The browser talks to Railway directly.
+Do not set `GOOGLE_APPLICATION_CREDENTIALS` on Railway. After deploy, open the public
+URL (`https://….up.railway.app`) on your phone; that is the app.
 
 Before making a deployment public, protect `/api/*`. These endpoints currently
 have no user authentication; anyone who can reach them can submit Gemini
