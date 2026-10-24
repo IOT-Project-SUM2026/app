@@ -74,6 +74,31 @@ export async function retryWhileBusy(task, { retries = 3, delayMs = 2000, sleep,
   }
 }
 
+export const RATE_LIMIT_MESSAGE = "Too many requests. Wait a minute and try again.";
+export const COMMANDS_PER_MINUTE = 15;
+export const STATUS_CHECKS_PER_MINUTE = 120;
+
+// Counts requests per address in a fixed time window. Protects the Gemini key and the
+// database from a stuck phone or from someone abusing the open API.
+export function createRateLimiter({ limit, windowMs = 60000, now = Date.now, maxKeys = 5000 }) {
+  const windows = new Map();
+  return {
+    take(key) {
+      const time = now();
+      let entry = windows.get(key);
+      if (!entry || time >= entry.resetAt) {
+        entry = { count: 0, resetAt: time + windowMs };
+        windows.set(key, entry);
+      }
+      entry.count += 1;
+      if (windows.size > maxKeys) {
+        for (const [other, value] of windows) if (time >= value.resetAt) windows.delete(other);
+      }
+      return { allowed: entry.count <= limit, retryAfterSeconds: Math.max(1, Math.ceil((entry.resetAt - time) / 1000)) };
+    }
+  };
+}
+
 export const SILENCE_MESSAGE = "I didn't hear anything. Hold the button while you speak.";
 export const UNCLEAR_MESSAGE = "Could not understand a valid command. Please try again.";
 
@@ -256,6 +281,35 @@ export function applyListChange(stored, command) {
   const items = storedItems(stored).filter((entry) => normalizeItem(entry) !== key);
   if (command.type === "add") items.push(command.item);
   return { tracked: true, items };
+}
+
+// Display off or offline: the display writes the time to /device/lastSeen every 10 seconds.
+// After 25 seconds without it, the server answers for the display and keeps the command
+// in the /commands queue, to be applied when the display is back.
+export const DEVICE_ONLINE_WINDOW_MS = 25000;
+export const DEVICE_OFFLINE_NOTE = "Your display is offline. The command is saved and will be applied when it is back.";
+
+// lastSeen is epoch milliseconds (Firebase server timestamp). A missing or implausible value
+// (for example the ESP32's uptime counter) means "unknown": the display is assumed online,
+// so displays that do not write /device/lastSeen keep working exactly as before.
+export function isDeviceOffline(lastSeen, now = Date.now()) {
+  if (typeof lastSeen !== "number" || !Number.isFinite(lastSeen) || lastSeen < 1e12) return false;
+  return now - lastSeen > DEVICE_ONLINE_WINDOW_MS;
+}
+
+// Commands in the /commands queue that the display has not answered yet, for one list, in order.
+export function pendingCommands(queue, list) {
+  return Object.values(queue && typeof queue === "object" ? queue : {})
+    .filter((entry) => entry && !entry.status && ["add", "remove"].includes(entry.type) &&
+      entry.list === list && typeof entry.item === "string" && Number.isSafeInteger(entry.runningCount))
+    .sort((a, b) => a.runningCount - b.runningCount);
+}
+
+// What the list will look like once the display catches up: the display's own array (/lists)
+// plus the commands still waiting. If the display keeps no array, our tracked copy is used.
+export function listWithPending(display, mine, pending) {
+  if (!Array.isArray(display)) return mine ?? display;
+  return pending.reduce((stored, command) => applyListChange(stored, command), display);
 }
 
 export function nextCommand(current, command) {

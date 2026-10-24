@@ -53,6 +53,17 @@ read `/commands` and answer each command by writing `{ "success": true, "text": 
 (matched by `runningCount`) for a display that only supports the original slots, but
 such a display can overwrite replies when two phones send at once.
 
+**Display off or offline.** The display writes the current time (Firebase server timestamp,
+epoch milliseconds, for example `{".sv": "timestamp"}`) to `/device/lastSeen` every 10 seconds.
+If that value is more than 25 seconds old, the server answers the app at once, like an
+online display ("Added milk to your shopping list"), checking duplicates and removals against
+`/lists` plus the commands still waiting in `/commands`. The command stays in the
+`/commands` queue; when the display is back it must apply every entry that has no `status`
+yet, in `runningCount` order, and write `{ "success": true, "text": "…" }` to
+`/commands/<pushId>/status`. A display that never writes `/device/lastSeen` (or writes a
+value that is not a clock time) is assumed to be online, so the old behaviour is kept.
+The display-side code (`firebase_sync.h`) belongs to the ESP32 firmware, not to this app.
+
 **Undo.** After a command that really changed a list, the app shows an Undo button. It
 sends the opposite command (add ↔ remove) without a recording, through the same checks and
 queue as a voice command. It is not offered when the list did not change (already on the

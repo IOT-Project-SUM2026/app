@@ -8,12 +8,16 @@ import { getDatabase, ServerValue } from "firebase-admin/database";
 import { fileURLToPath } from "node:url";
 import {
   validateCommand, nextCommand, waitForStatus, verifyTranscript, checkRemoval, applyListChange,
-  checkHeard, checkDuplicate, UNCLEAR_MESSAGE, retryWhileBusy, BUSY_MESSAGE, withTimeout, commandStatusRef, isPushId
+  checkHeard, checkDuplicate, UNCLEAR_MESSAGE, retryWhileBusy, BUSY_MESSAGE, withTimeout, commandStatusRef, isPushId,
+  createRateLimiter, RATE_LIMIT_MESSAGE, COMMANDS_PER_MINUTE, STATUS_CHECKS_PER_MINUTE,
+  isDeviceOffline, pendingCommands, listWithPending, DEVICE_OFFLINE_NOTE
 } from "./commands.js";
 
 dotenv.config();
 
 const app = express();
+// Behind Railway's proxy, req.ip must be the visitor's address, not the proxy's.
+app.set("trust proxy", 1);
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || (process.env.NODE_ENV === "production" ? "0.0.0.0" : "127.0.0.1");
 app.use(express.json({ limit: "10kb" }));
@@ -40,10 +44,34 @@ async function readList(name) {
   return { display: display.val(), mine: mine.val() };
 }
 
-// The display's own array wins when it keeps one; otherwise our tracked copy.
+// Is the display off or offline? It writes the time to /device/lastSeen every 10 seconds.
+async function displayIsOffline() {
+  try {
+    return isDeviceOffline((await database.ref("device/lastSeen").get()).val());
+  } catch {
+    return false;
+  }
+}
+
+// The display's own array wins when it keeps one; otherwise our tracked copy. While the display
+// is offline, the commands still waiting in /commands are counted too, so that duplicate and
+// removal checks match what the list will look like when the display is back.
 async function currentList(name) {
   const { display, mine } = await readList(name);
-  return Array.isArray(display) ? display : (mine ?? display);
+  if (!Array.isArray(display) || !(await displayIsOffline())) {
+    return Array.isArray(display) ? display : (mine ?? display);
+  }
+  const queue = (await database.ref("commands").limitToLast(200).get()).val();
+  return listWithPending(display, mine, pendingCommands(queue, name));
+}
+
+// Keep our own copy of a list in sync after a command (idempotent). If the display keeps its
+// own array in /lists, that array is the source of truth and nothing is written here.
+async function syncTrackedList(sent) {
+  const own = (await database.ref(`lists/${sent.list}`).get()).val();
+  if (!Array.isArray(own)) {
+    await database.ref(`appLists/${sent.list}`).transaction((stored) => applyListChange(stored ?? own, sent));
+  }
 }
 
 async function removalError(command) {
@@ -100,14 +128,36 @@ const ai = new GoogleGenAI({
 // Gemini busy (503): retry 3 times, 2 seconds apart, then report an error.
 function generateWithRetry(request) {
   // Every call is cancelled after 20 s, so the app never waits forever.
-  return retryWhileBusy(() => withTimeout((abortSignal) =>
-    ai.models.generateContent({ ...request, config: { ...request.config, abortSignal } })), {
+  return retryWhileBusy(() => withTimeout((abortSignal) => {
+    // Test switch (ignored in production): SIMULATE_GEMINI=busy answers 503, =hang never answers.
+    if (process.env.NODE_ENV !== "production" && process.env.SIMULATE_GEMINI === "busy") {
+      return Promise.reject(Object.assign(new Error("Simulated busy Gemini"), { status: 503 }));
+    }
+    if (process.env.NODE_ENV !== "production" && process.env.SIMULATE_GEMINI === "hang") {
+      return new Promise(() => {});
+    }
+    return ai.models.generateContent({ ...request, config: { ...request.config, abortSignal } });
+  }), {
     onRetry: (attempt, retries) => console.log(`Gemini busy. Retry ${attempt}/${retries}...`)
   });
 }
 
+// At most 15 commands and 120 status checks per minute per address (separate counters), so a
+// stuck phone or someone abusing the open API cannot drain the Gemini key or flood Firebase.
+const limitBy = (limiter) => (req, res, next) => {
+  const { allowed, retryAfterSeconds } = limiter.take(req.ip ?? "unknown");
+  if (allowed) return next();
+  console.log("Rate limited:", req.ip, req.path);
+  res.set("Retry-After", String(retryAfterSeconds));
+  res.status(429).json({ error: RATE_LIMIT_MESSAGE });
+};
+const voiceLimit = limitBy(createRateLimiter({ limit: COMMANDS_PER_MINUTE }));
+const sendLimit = limitBy(createRateLimiter({ limit: COMMANDS_PER_MINUTE }));
+const statusLimit = limitBy(createRateLimiter({ limit: STATUS_CHECKS_PER_MINUTE }));
+
 app.post(
   "/api/voice-command",
+  voiceLimit,
   upload.single("audio"),
   async (req, res) => {
     try {
@@ -241,7 +291,7 @@ Do not return explanations.
   }
 );
 
-app.post("/api/confirm-command", async (req, res) => {
+app.post("/api/confirm-command", sendLimit, async (req, res) => {
   let command;
   try {
     command = validateCommand(req.body);
@@ -280,7 +330,22 @@ app.post("/api/confirm-command", async (req, res) => {
   }
 });
 
-app.get("/api/command-status/:count", async (req, res) => {
+// The reply for a command whose display is offline: success, without making the user wait.
+// Returns null when the command is unknown or the display already answered it.
+async function answerForOfflineDisplay(id, count) {
+  const sent = (await database.ref(`commands/${id}`).get()).val();
+  if (!sent || sent.runningCount !== count || sent.status) return null;
+  if (["add", "remove"].includes(sent.type) && ["shopping", "todo"].includes(sent.list)) {
+    try {
+      await syncTrackedList(sent);
+    } catch (error) {
+      console.error("List sync error:", error.code ?? error.name);
+    }
+  }
+  return { runningCount: count, success: true, text: DEVICE_OFFLINE_NOTE, queued: true };
+}
+
+app.get("/api/command-status/:count", statusLimit, async (req, res) => {
   const count = Number(req.params.count);
   if (!Number.isSafeInteger(count) || count < 1) {
     return res.status(400).json({ error: "Invalid command number." });
@@ -295,22 +360,27 @@ app.get("/api/command-status/:count", async (req, res) => {
   try {
     // This phone only listens for the reply to ITS command: the private reply in its queue
     // entry, or (older displays) the shared /status carrying the same runningCount.
+    // Display off or offline: answer at once, as if it had answered. The command stays in the
+    // /commands queue and the display applies it when it is back.
+    if (id && await displayIsOffline()) {
+      const queued = await answerForOfflineDisplay(id, count);
+      if (queued) {
+        console.log("Display offline: command", count, "queued");
+        return res.json({ status: queued });
+      }
+    }
     const sources = [database.ref("status")];
     if (id) sources.unshift(commandStatusRef(database.ref(`commands/${id}/status`), count));
-    const status = await waitForStatus(sources, count, { signal: controller.signal });
-    if (status?.success) {
+    let status = await waitForStatus(sources, count, { signal: controller.signal });
+    // No answer in time and the display went offline meanwhile: same quiet answer.
+    if (!status && id && await displayIsOffline()) status = await answerForOfflineDisplay(id, count);
+    if (status?.success && !status.queued) {
       // Keep our copy of the lists in sync once the display confirmed (idempotent).
       try {
         const sent = (await database.ref(id ? `commands/${id}` : "command").get()).val();
         if (sent?.runningCount === count && ["add", "remove"].includes(sent.type) &&
             ["shopping", "todo"].includes(sent.list)) {
-          // If the display keeps its own array in /lists, it is the source of truth.
-          const own = (await database.ref(`lists/${sent.list}`).get()).val();
-          if (!Array.isArray(own)) {
-            await database.ref(`appLists/${sent.list}`).transaction(
-              (stored) => applyListChange(stored ?? own, sent)
-            );
-          }
+          await syncTrackedList(sent);
         }
       } catch (error) {
         console.error("List sync error:", error.code ?? error.name);

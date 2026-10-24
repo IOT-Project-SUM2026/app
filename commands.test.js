@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   validateCommand, nextCommand, waitForStatus, verifyTranscript, checkRemoval, applyListChange, checkHeard, checkDuplicate, retryWhileBusy, commandStatusRef, isPushId,
+  createRateLimiter, RATE_LIMIT_MESSAGE, COMMANDS_PER_MINUTE, STATUS_CHECKS_PER_MINUTE,
+  isDeviceOffline, pendingCommands, listWithPending, DEVICE_ONLINE_WINDOW_MS, DEVICE_OFFLINE_NOTE,
   withTimeout, GEMINI_TIMEOUT_MS, BUSY_MESSAGE
 } from "./commands.js";
 
@@ -289,6 +291,81 @@ test("two phones sending at the same moment each get the reply to their own comm
   ref(`commands/${idB}/status`).set({ success: true, text: "not for A" });
   assert.equal(await lonely, null);
   assert.equal(count(`commands/${idA}/status`), 0);
+});
+
+test("too many requests from one address are refused", () => {
+  assert.equal(RATE_LIMIT_MESSAGE, "Too many requests. Wait a minute and try again.");
+  assert.equal(COMMANDS_PER_MINUTE, 15);
+  assert.equal(STATUS_CHECKS_PER_MINUTE, 120);
+  let time = 1_000_000;
+  const commands = createRateLimiter({ limit: COMMANDS_PER_MINUTE, now: () => time });
+  // The first 15 commands in a minute pass, the 16th is refused with a wait time.
+  for (let i = 1; i <= 15; i++) assert.equal(commands.take("1.2.3.4").allowed, true);
+  const refused = commands.take("1.2.3.4");
+  assert.equal(refused.allowed, false);
+  assert.equal(refused.retryAfterSeconds, 60);
+  assert.equal(commands.take("1.2.3.4").allowed, false);
+  // Another address is not affected.
+  assert.equal(commands.take("5.6.7.8").allowed, true);
+  // Half a minute later it is still blocked, with a shorter wait.
+  time += 30_000;
+  const later = commands.take("1.2.3.4");
+  assert.equal(later.allowed, false);
+  assert.equal(later.retryAfterSeconds, 30);
+  // After the minute, the address can send again.
+  time += 30_000;
+  assert.equal(commands.take("1.2.3.4").allowed, true);
+  // Status checks allow 120 a minute.
+  const statuses = createRateLimiter({ limit: STATUS_CHECKS_PER_MINUTE, now: () => time });
+  for (let i = 1; i <= 120; i++) assert.equal(statuses.take("a").allowed, true);
+  assert.equal(statuses.take("a").allowed, false);
+  // Old addresses are forgotten, so the table cannot grow forever.
+  const small = createRateLimiter({ limit: 1, now: () => time, maxKeys: 3 });
+  for (const key of ["a", "b", "c"]) small.take(key);
+  time += 61_000;
+  small.take("d");
+  assert.equal(small.take("a").allowed, true);
+});
+
+test("display off or offline: the server answers from /lists plus the commands still waiting", () => {
+  const now = 1_800_000_000_000;
+  // Online while /device/lastSeen is fresh (written every 10 s); offline after 25 s without it.
+  assert.equal(DEVICE_ONLINE_WINDOW_MS, 25000);
+  assert.equal(isDeviceOffline(now - 10_000, now), false);
+  assert.equal(isDeviceOffline(now - 25_000, now), false);
+  assert.equal(isDeviceOffline(now - 25_001, now), true);
+  assert.equal(isDeviceOffline(now - 3_600_000, now), true);
+  // Unknown is treated as online, so displays that never write lastSeen keep working.
+  for (const unknown of [undefined, null, "now", NaN, 123456 /* uptime counter, not a clock */]) {
+    assert.equal(isDeviceOffline(unknown, now), false);
+  }
+  assert.equal(isDeviceOffline(now + 5_000, now), false);
+
+  // Commands still waiting in the queue: no status yet, right list, in order.
+  const queue = {
+    "-Oa": { type: "add", item: "eggs", list: "shopping", runningCount: 3 },
+    "-Ob": { type: "remove", item: "milk", list: "shopping", runningCount: 2 },
+    "-Oc": { type: "add", item: "bread", list: "shopping", runningCount: 1, status: { success: true } },
+    "-Od": { type: "add", item: "call mom", list: "todo", runningCount: 4 },
+    "-Oe": { type: "erase", item: "x", list: "shopping", runningCount: 5 }
+  };
+  const pending = pendingCommands(queue, "shopping");
+  assert.deepEqual(pending.map((entry) => entry.runningCount), [2, 3]);
+  assert.deepEqual(pendingCommands(null, "shopping"), []);
+  assert.deepEqual(pendingCommands("junk", "shopping"), []);
+
+  // The list as it will be once the display is back: /lists array plus waiting commands.
+  const effective = listWithPending(["Milk", "bread"], null, pending);
+  assert.deepEqual(effective.items, ["bread", "eggs"]);
+  // So the usual checks answer from that list, not from the stale one.
+  assert.equal(checkDuplicate(effective, { type: "add", item: "Eggs", list: "shopping" }), "Eggs is already on your shopping list.");
+  assert.match(checkRemoval(effective, { type: "remove", item: "milk", list: "shopping" }), /not on your shopping list/);
+  assert.equal(checkRemoval(effective, { type: "remove", item: "eggs", list: "shopping" }), null);
+  // Without a /lists array the app's own tracked copy is used; nothing is counted twice.
+  const mine = { tracked: true, items: ["tea"] };
+  assert.equal(listWithPending(undefined, mine, pending), mine);
+  assert.equal(listWithPending(["a"], null, []).items?.length ?? 1, 1);
+  assert.match(DEVICE_OFFLINE_NOTE, /saved and will be applied when it is back/);
 });
 
 test("an item that was not said is rejected", () => {
