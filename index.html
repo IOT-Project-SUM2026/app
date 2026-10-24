@@ -22,6 +22,7 @@
   <p id="offlineNotice" class="app-notice" role="status" hidden>You’re offline. Connect to the internet to send voice commands.</p>
   <main aria-label="Voice control">
     <span class="state-label" id="stateLabel">Ready</span>
+    <p id="displayStatus" class="display-status" role="status" aria-live="polite"></p>
     <div class="voice-stage">
       <div class="halo" aria-hidden="true"></div>
       <div class="orbit" aria-hidden="true"></div>
@@ -35,6 +36,26 @@
     <p id="recordHint">Add or remove an item with your voice.<br>Release to send.</p>
     <div class="feedback" role="status" aria-live="polite" aria-atomic="true"><p id="status"></p></div>
     <button id="undoButton" class="undo-button" type="button" hidden>Undo</button>
+    <button id="typeToggle" class="link-button" type="button" aria-expanded="false" aria-controls="typeForm">Type instead</button>
+    <form id="typeForm" class="type-form" hidden>
+      <label for="typeInput" class="visually-hidden">Command</label>
+      <input id="typeInput" type="text" maxlength="200" autocomplete="off" enterkeyhint="send" dir="auto"
+             placeholder="Add milk to my shopping list">
+      <button type="submit">Send</button>
+    </form>
+    <section class="lists-panel" aria-label="Your lists">
+      <button id="listsToggle" class="link-button" type="button" aria-expanded="false" aria-controls="listsBody">Show my lists</button>
+      <div id="listsBody" class="lists-body" hidden>
+        <div class="list-column"><h2>Shopping</h2><ul id="shoppingList"></ul></div>
+        <div class="list-column"><h2>To-do</h2><ul id="todoList"></ul></div>
+        <p id="listsNote" class="lists-note"></p>
+      </div>
+    </section>
+    <form id="codeForm" class="code-form" hidden>
+      <label for="codeInput">App code</label>
+      <input id="codeInput" type="password" autocomplete="current-password" required maxlength="64">
+      <button type="submit">Save</button>
+    </form>
     <p class="keyboard-hint">You can also hold <kbd>Space</kbd> when the button is focused.</p>
   </main>
   <script>

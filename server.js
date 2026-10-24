@@ -6,11 +6,12 @@ import { GoogleGenAI } from "@google/genai";
 import { applicationDefault, cert, initializeApp } from "firebase-admin/app";
 import { getDatabase, ServerValue } from "firebase-admin/database";
 import { fileURLToPath } from "node:url";
+import { timingSafeEqual } from "node:crypto";
 import {
   validateCommand, nextCommand, waitForStatus, verifyTranscript, checkRemoval, applyListChange,
   checkHeard, checkDuplicate, UNCLEAR_MESSAGE, retryWhileBusy, BUSY_MESSAGE, withTimeout, commandStatusRef, isPushId,
   createRateLimiter, RATE_LIMIT_MESSAGE, COMMANDS_PER_MINUTE, STATUS_CHECKS_PER_MINUTE,
-  isDeviceOffline, pendingCommands, listWithPending, DEVICE_OFFLINE_NOTE
+  isDeviceOffline, pendingCommands, listWithPending, DEVICE_OFFLINE_NOTE, storedItems, MISSING_VERB_MESSAGE
 } from "./commands.js";
 
 dotenv.config();
@@ -107,9 +108,23 @@ app.use(
       "http://127.0.0.1:3000",
       "http://localhost:3000",
       ...extraOrigins
-    ]
+    ],
+    allowedHeaders: ["Content-Type", "X-App-Code"]
   })
 );
+
+// Optional access code (APP_CODE in .env / Railway variables). When it is set, every /api
+// request except /api/health must send it in the X-App-Code header, so a stranger who finds the
+// server's address can't change the lists or use the Gemini key. The app asks for it once.
+const APP_CODE = (process.env.APP_CODE || "").trim();
+function codeMatches(sent) {
+  const a = Buffer.from(String(sent ?? "")), b = Buffer.from(APP_CODE);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+app.use("/api", (req, res, next) => {
+  if (!APP_CODE || req.path === "/health" || codeMatches(req.get("X-App-Code"))) return next();
+  res.status(401).json({ error: "Enter the app code to use this display.", needCode: true });
+});
 
 app.get("/api/health", (_req, res) => {
   res.set("Cache-Control", "no-store");
@@ -120,6 +135,56 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 }
 });
+
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash-lite";
+
+const VOICE_PROMPT = `
+Listen to this voice command.
+
+Extract the action, item and destination list ONLY when the user clearly says all three.
+The user must explicitly say "add" or "remove" and explicitly name one of the supported lists.
+Never infer an action or list from the item, context, or a typical usage pattern.
+For example, if the user says only "Chico", return action null, item "Chico", list null.
+Do not turn a bare item name into an add command.
+The user may speak English or Hebrew. Keep "item" and "transcript" in the language and script the user
+spoke; never translate them. Hebrew verbs such as תוסיף/הוסף mean "add" and תמחק/הסר mean "remove";
+Hebrew קניות means the shopping list and משימות means the to-do list.
+Choose "shopping" when the user says shopping list or groceries.
+Choose "todo" when the user says to-do list, task list, or something they need to do.
+For example, "add milk to my shopping list" means action "add", item "milk", list "shopping".
+"Add call the dentist to my to-do list" means action "add", item "call the dentist", list "todo".
+Do not guess between the two lists. If the user names any other list, return that list name
+as the "list" value exactly as heard; the command will be rejected and the user can try again.
+
+The item is whatever words come between the verb and the list name, even if it sounds strange, like a
+question or a greeting: "add where are you to my shopping list" means action "add", item "where are you",
+list "shopping". Decide by the sentence structure (verb, item, list), never by what the item means.
+If the user negates the command ("don't add milk", "do not remove eggs", "אל תוסיף חלב"), return
+action null; never do what the user said not to do.
+
+Return "multipleItems": true when the user names more than one separate item, for example
+"add milk and eggs" or "add milk, eggs and bread"; in that case "item" is the whole phrase.
+Return false when the words form ONE item, for example "add mac and cheese" or "add salt and pepper
+shaker". Decide by meaning, not by the word "and".
+
+Also return "transcript": the exact words spoken, word for word, without adding anything.
+If the audio is silent, only background noise, or contains no clear spoken words, return
+"transcript": "" (an empty string). Never invent words that were not spoken.
+If the audio is unclear or is not a command, return null for action, item and list.
+
+Return ONLY valid JSON in this exact format:
+
+{
+  "transcript": "<exact words heard>",
+  "action": "add", "remove", or null,
+  "item": "<item name>",
+  "multipleItems": true or false,
+  "list": "shopping", "todo", the unsupported list name, or null
+}
+
+Do not return markdown.
+Do not return explanations.
+`;
 
 const ai = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY
@@ -177,7 +242,7 @@ app.post(
         : req.file.mimetype;
 
       const response = await generateWithRetry({
-        model: "gemini-3.5-flash-lite",
+        model: GEMINI_MODEL,
 
         contents: [
           {
@@ -185,53 +250,7 @@ app.post(
 
             parts: [
               {
-                text: `
-Listen to this voice command.
-
-Extract the action, item and destination list ONLY when the user clearly says all three.
-The user must explicitly say "add" or "remove" and explicitly name one of the supported lists.
-Never infer an action or list from the item, context, or a typical usage pattern.
-For example, if the user says only "Chico", return action null, item "Chico", list null.
-Do not turn a bare item name into an add command.
-The user may speak English or Hebrew. Keep "item" and "transcript" in the language and script the user
-spoke; never translate them. Hebrew verbs such as תוסיף/הוסף mean "add" and תמחק/הסר mean "remove";
-Hebrew קניות means the shopping list and משימות means the to-do list.
-Choose "shopping" when the user says shopping list or groceries.
-Choose "todo" when the user says to-do list, task list, or something they need to do.
-For example, "add milk to my shopping list" means action "add", item "milk", list "shopping".
-"Add call the dentist to my to-do list" means action "add", item "call the dentist", list "todo".
-Do not guess between the two lists. If the user names any other list, return that list name
-as the "list" value exactly as heard; the command will be rejected and the user can try again.
-
-The item is whatever words come between the verb and the list name, even if it sounds strange, like a
-question or a greeting: "add where are you to my shopping list" means action "add", item "where are you",
-list "shopping". Decide by the sentence structure (verb, item, list), never by what the item means.
-If the user negates the command ("don't add milk", "do not remove eggs", "אל תוסיף חלב"), return
-action null; never do what the user said not to do.
-
-Return "multipleItems": true when the user names more than one separate item, for example
-"add milk and eggs" or "add milk, eggs and bread"; in that case "item" is the whole phrase.
-Return false when the words form ONE item, for example "add mac and cheese" or "add salt and pepper
-shaker". Decide by meaning, not by the word "and".
-
-Also return "transcript": the exact words spoken, word for word, without adding anything.
-If the audio is silent, only background noise, or contains no clear spoken words, return
-"transcript": "" (an empty string). Never invent words that were not spoken.
-If the audio is unclear or is not a command, return null for action, item and list.
-
-Return ONLY valid JSON in this exact format:
-
-{
-  "transcript": "<exact words heard>",
-  "action": "add", "remove", or null,
-  "item": "<item name>",
-  "multipleItems": true or false,
-  "list": "shopping", "todo", the unsupported list name, or null
-}
-
-Do not return markdown.
-Do not return explanations.
-`
+                text: `${VOICE_PROMPT}`
               },
 
               {
@@ -246,33 +265,7 @@ Do not return explanations.
         config: { temperature: 0, responseMimeType: "application/json" }
       });
 
-      const cleanedText = (response.text ?? "")
-        .replace(/```json/g, "")
-        .replace(/```/g, "")
-        .trim();
-
-      let parsedCommand;
-      try {
-        parsedCommand = JSON.parse(cleanedText);
-      } catch {
-        return res.status(422).json({ error: UNCLEAR_MESSAGE });
-      }
-      console.log("Gemini heard:", JSON.stringify(parsedCommand));
-      let command;
-      try {
-        parsedCommand = checkHeard(parsedCommand);
-        // verifyTranscript returns the command with the list the user actually named.
-        command = verifyTranscript(parsedCommand.transcript, validateCommand(parsedCommand));
-      } catch (error) {
-        console.log("Rejected:", error.message);
-        return res.status(422).json({ error: error.message });
-      }
-      const missing = await removalError(command);
-      if (missing) {
-        console.log("Rejected:", missing);
-        return res.status(422).json({ error: missing });
-      }
-      res.json(command);
+      await answerUnderstood(res, response.text);
     } catch (error) {
       console.error("Voice command error:", {
         name: error.name,
@@ -290,6 +283,86 @@ Do not return explanations.
     }
   }
 );
+
+// Same checks for a voice command and a typed one: Gemini's JSON must hold an explicit verb,
+// one item that was really said (or typed) and a named list. `typed` replaces the transcript,
+// so Gemini can't change what the user typed.
+async function answerUnderstood(res, text, typed) {
+  const cleanedText = (text ?? "").replace(/```json/g, "").replace(/```/g, "").trim();
+  let parsedCommand;
+  try {
+    parsedCommand = JSON.parse(cleanedText);
+  } catch {
+    return res.status(422).json({ error: UNCLEAR_MESSAGE });
+  }
+  if (typed !== undefined && parsedCommand && typeof parsedCommand === "object") parsedCommand.transcript = typed;
+  console.log(typed !== undefined ? "Gemini read:" : "Gemini heard:", JSON.stringify(parsedCommand));
+  let command;
+  try {
+    parsedCommand = checkHeard(parsedCommand);
+    // verifyTranscript returns the command with the list the user actually named.
+    command = verifyTranscript(parsedCommand.transcript, validateCommand(parsedCommand));
+  } catch (error) {
+    console.log("Rejected:", error.message);
+    return res.status(422).json({ error: error.message });
+  }
+  const missing = await removalError(command);
+  if (missing) {
+    console.log("Rejected:", missing);
+    return res.status(422).json({ error: missing });
+  }
+  res.json(command);
+}
+
+// "Type instead": the typed sentence goes through the same prompt and the same checks as a
+// recording, so typing follows exactly the same rules (and gives the same messages) as voice.
+app.post("/api/text-command", voiceLimit, async (req, res) => {
+  const text = typeof req.body?.text === "string" ? req.body.text.trim().replace(/\s+/g, " ") : "";
+  if (!text) return res.status(422).json({ error: MISSING_VERB_MESSAGE });
+  if (text.length > 200) return res.status(422).json({ error: "That's too long. Type one short command." });
+  try {
+    const response = await generateWithRetry({
+      model: GEMINI_MODEL,
+      contents: [{ role: "user", parts: [
+        { text: VOICE_PROMPT },
+        { text: `The user TYPED this command instead of speaking. Treat the typed text as the spoken words:\n${text}` }
+      ] }],
+      config: { temperature: 0, responseMimeType: "application/json" }
+    });
+    await answerUnderstood(res, response.text, text);
+  } catch (error) {
+    console.error("Typed command error:", { name: error.name, code: error.code, status: error.status });
+    if (error.status === 503 || error.code === "GEMINI_TIMEOUT") return res.status(503).json({ error: BUSY_MESSAGE });
+    res.status(500).json({ error: "Could not understand the command. Please try again." });
+  }
+});
+
+// Both lists, shown under "Show my lists". While the display is offline the commands still
+// waiting are included, so the phone shows what the display will show when it is back.
+app.get("/api/lists", statusLimit, async (_req, res) => {
+  res.set("Cache-Control", "no-store");
+  try {
+    const [shopping, todo] = await Promise.all([currentList("shopping"), currentList("todo")]);
+    res.json({ shopping: storedItems(shopping), todo: storedItems(todo) });
+  } catch {
+    res.status(502).json({ error: "Couldn't load your lists right now." });
+  }
+});
+
+// Is the display online? Shown above the button. The display writes /device/lastSeen (server
+// time) every 10 s and /device/protocol; an older firmware can't read the /commands queue.
+const PROTOCOL = 2;
+app.get("/api/display", statusLimit, async (_req, res) => {
+  res.set("Cache-Control", "no-store");
+  try {
+    const device = (await database.ref("device").get()).val() ?? {};
+    const lastSeen = typeof device.lastSeen === "number" && device.lastSeen > 1e12 ? device.lastSeen : null;
+    res.json({ online: lastSeen !== null && !isDeviceOffline(lastSeen), lastSeen,
+      needsUpdate: lastSeen !== null && device.protocol !== PROTOCOL });
+  } catch {
+    res.status(502).json({ error: "Couldn't check the display right now." });
+  }
+});
 
 app.post("/api/confirm-command", sendLimit, async (req, res) => {
   let command;
@@ -330,6 +403,22 @@ app.post("/api/confirm-command", sendLimit, async (req, res) => {
   }
 });
 
+// Replies nobody read: when the display was offline the server answered at once, and the
+// display still writes its reply when it is back. Replies older than 10 minutes are removed
+// (checked at most once a minute).
+let lastCleanUp = 0;
+function cleanUpOldReplies() {
+  if (Date.now() - lastCleanUp < 60000) return;
+  lastCleanUp = Date.now();
+  database.ref("status").orderByChild("at").endAt(Date.now() - 600000).get()
+    .then((old) => {
+      const removals = {};
+      old.forEach((child) => { removals[child.key] = null; });
+      if (Object.keys(removals).length) return database.ref("status").update(removals);
+    })
+    .catch(() => {});
+}
+
 // The reply for a command whose display is offline: success, without making the user wait.
 // Returns null when the command is unknown or the display already answered it.
 async function answerForOfflineDisplay(id, count) {
@@ -369,9 +458,16 @@ app.get("/api/command-status/:count", statusLimit, async (req, res) => {
         return res.json({ status: queued });
       }
     }
-    const sources = [database.ref("status")];
-    if (id) sources.unshift(commandStatusRef(database.ref(`commands/${id}/status`), count));
+    // The current display firmware answers in /status/<id> (and removes /commands/<id>).
+    // Only this command's own reply is watched, not the whole /status folder, so a reply to
+    // another command doesn't wake this request. The shared /status slot is only for an old
+    // client that sends no id.
+    const sources = id
+      ? [commandStatusRef(database.ref(`status/${id}`), count), commandStatusRef(database.ref(`commands/${id}/status`), count)]
+      : [database.ref("status")];
     let status = await waitForStatus(sources, count, { signal: controller.signal });
+    if (id) database.ref(`status/${id}`).remove().catch(() => {});  // read once
+    cleanUpOldReplies();
     // No answer in time and the display went offline meanwhile: same quiet answer.
     if (!status && id && await displayIsOffline()) status = await answerForOfflineDisplay(id, count);
     if (status?.success && !status.queued) {

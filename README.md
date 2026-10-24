@@ -95,10 +95,24 @@ the same address, so one deployment is the whole system and no CORS setup is nee
 Do not set `GOOGLE_APPLICATION_CREDENTIALS` on Railway. After deploy, open the public
 URL (`https://….up.railway.app`) on your phone; that is the app.
 
-Before making a deployment public, protect `/api/*`. These endpoints currently
-have no user authentication; anyone who can reach them can submit Gemini
-requests and Firebase commands. The PWA conversion does not add account
-management.
+- `APP_CODE` (recommended) — any secret word. When it is set, every `/api/*` request except
+  `/api/health` must send it in the `X-App-Code` header. The app asks for it once and keeps
+  it on the phone, so a stranger who finds the address can't change the lists or use the
+  Gemini key. Without `APP_CODE` the API is open (still limited per address per minute).
+- `GEMINI_MODEL` (optional) — defaults to `gemini-3.5-flash-lite`.
+
+### Endpoints
+
+- `POST /api/voice-command` — recording → understood command (or 422 with the reason).
+- `POST /api/text-command` `{text}` — "Type instead": the typed sentence goes through the
+  same prompt and the same checks as a recording, so it follows the same rules and messages.
+- `POST /api/confirm-command` — sends a command to the display (`/commands` queue).
+- `GET /api/command-status/:count?id=` — the display's reply. The current firmware writes
+  it to `/status/<id>`; it is removed once read.
+- `GET /api/lists` — both lists for "Show my lists" (with commands still waiting while the
+  display is offline).
+- `GET /api/display` — `{online, lastSeen, needsUpdate}` for the line above the button
+  ("Display online" / "Display offline since 17:05" / "The display needs a firmware update").
 
 After deployment, open the HTTPS URL on your phone:
 
