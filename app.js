@@ -1,3 +1,5 @@
+const SILENCE_MESSAGE = "I didn't hear anything. Hold the button while you speak.";
+const MIN_RECORDING_MS = 500;
 const recordButton = document.getElementById("recordButton");
 const statusText = document.getElementById("status");
 const apiBase = window.API_BASE ?? (
@@ -64,10 +66,17 @@ async function startRecording() {
       recorder = null;
       busy = true;
       recordButton.disabled = true;
-      await sendAudio(new Blob(chunks, { type: current.mimeType }));
+      const blob = new Blob(chunks, { type: current.mimeType });
+      // A tap or an empty recording is never sent to the server.
+      if (!blob.size || Date.now() - startedAt < MIN_RECORDING_MS) {
+        showState("error", SILENCE_MESSAGE);
+      } else {
+        await sendAudio(blob);
+      }
       busy = false;
       recordButton.disabled = false;
     };
+    const startedAt = Date.now();
     current.start();
     recordingTimer = setTimeout(stopRecording, 30000);
     showState("recording", "Listening… release the button to send.");
@@ -90,7 +99,6 @@ function stopRecording() {
 
 async function sendAudio(blob) {
   try {
-    if (!blob.size) throw new Error("No audio recorded. Hold the button and try again.");
     showState("processing", "Understanding your request…");
     const form = new FormData();
     const extension = blob.type.includes("mp4") ? "mp4" : blob.type.includes("ogg") ? "ogg" : "webm";

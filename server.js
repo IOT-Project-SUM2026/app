@@ -7,7 +7,8 @@ import { applicationDefault, cert, initializeApp } from "firebase-admin/app";
 import { getDatabase } from "firebase-admin/database";
 import { fileURLToPath } from "node:url";
 import {
-  validateCommand, nextCommand, waitForStatus, verifyTranscript, checkRemoval, applyListChange
+  validateCommand, nextCommand, waitForStatus, verifyTranscript, checkRemoval, applyListChange,
+  checkHeard, UNCLEAR_MESSAGE
 } from "./commands.js";
 
 dotenv.config();
@@ -142,6 +143,9 @@ The user must explicitly say "add" or "remove" and explicitly name one of the su
 Never infer an action or list from the item, context, or a typical usage pattern.
 For example, if the user says only "Chico", return action null, item "Chico", list null.
 Do not turn a bare item name into an add command.
+The user may speak English or Hebrew. Keep "item" and "transcript" in the language and script the user
+spoke; never translate them. Hebrew verbs such as תוסיף/הוסף mean "add" and תמחק/הסר mean "remove";
+Hebrew קניות means the shopping list and משימות means the to-do list.
 Choose "shopping" when the user says shopping list or groceries.
 Choose "todo" when the user says to-do list, task list, or something they need to do.
 For example, "add milk to my shopping list" means action "add", item "milk", list "shopping".
@@ -149,8 +153,21 @@ For example, "add milk to my shopping list" means action "add", item "milk", lis
 Do not guess between the two lists. If the user names any other list, return that list name
 as the "list" value exactly as heard; the command will be rejected and the user can try again.
 
+The item is whatever words come between the verb and the list name, even if it sounds strange, like a
+question or a greeting: "add where are you to my shopping list" means action "add", item "where are you",
+list "shopping". Decide by the sentence structure (verb, item, list), never by what the item means.
+If the user negates the command ("don't add milk", "do not remove eggs", "אל תוסיף חלב"), return
+action null; never do what the user said not to do.
+
+Return "multipleItems": true when the user names more than one separate item, for example
+"add milk and eggs" or "add milk, eggs and bread"; in that case "item" is the whole phrase.
+Return false when the words form ONE item, for example "add mac and cheese" or "add salt and pepper
+shaker". Decide by meaning, not by the word "and".
+
 Also return "transcript": the exact words spoken, word for word, without adding anything.
-If the audio is unclear, silent or is not a command, return null for action, item and list.
+If the audio is silent, only background noise, or contains no clear spoken words, return
+"transcript": "" (an empty string). Never invent words that were not spoken.
+If the audio is unclear or is not a command, return null for action, item and list.
 
 Return ONLY valid JSON in this exact format:
 
@@ -158,6 +175,7 @@ Return ONLY valid JSON in this exact format:
   "transcript": "<exact words heard>",
   "action": "add", "remove", or null,
   "item": "<item name>",
+  "multipleItems": true or false,
   "list": "shopping", "todo", the unsupported list name, or null
 }
 
@@ -187,13 +205,14 @@ Do not return explanations.
       try {
         parsedCommand = JSON.parse(cleanedText);
       } catch {
-        return res.status(422).json({ error: "Could not understand a valid command. Please try again." });
+        return res.status(422).json({ error: UNCLEAR_MESSAGE });
       }
       console.log("Gemini heard:", JSON.stringify(parsedCommand));
       let command;
       try {
-        command = validateCommand(parsedCommand);
-        verifyTranscript(parsedCommand.transcript, command);
+        parsedCommand = checkHeard(parsedCommand);
+        // verifyTranscript returns the command with the list the user actually named.
+        command = verifyTranscript(parsedCommand.transcript, validateCommand(parsedCommand));
       } catch (error) {
         console.log("Rejected:", error.message);
         return res.status(422).json({ error: error.message });

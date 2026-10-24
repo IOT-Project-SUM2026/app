@@ -9,14 +9,13 @@ account JSON, stored outside this directory) or `FIREBASE_SERVICE_ACCOUNT`
 only the backend uses the Admin SDK.
 
 Hold the button to record, then release. The app asks Gemini to interpret the audio and shows
-the action, item, and list for confirmation. Nothing is sent to Firebase until you choose
-“Yes, send it”; “No, cancel” discards the command.
-After confirmation, the validated result is written to
+the action, item, and list. There is no confirmation step: once the command is understood and
+validated, it is sent immediately. The validated result is written to
 `/command` as `{ "type": "add", "item": "tomato", "list": "shopping", "runningCount": 1 }`.
 Commands can target either list: for example, “add tomatoes to my shopping list” uses
 `"list": "shopping"`, while “add call the dentist to my to-do list” uses `"list": "todo"`.
 Other list names are rejected before anything is written to Firebase; the app asks the user
-to choose the shopping list or to-do list.
+to choose the shopping list or to-do list ("There are two lists: shopping and to-do.").
 The model is instructed not to infer an action or list from an item name alone; incomplete
 commands are rejected with a prompt to say the action and list.
 The counter increments atomically for every write, including repeated commands.
