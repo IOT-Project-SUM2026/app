@@ -234,6 +234,7 @@ async function sendCommand(draft, { undo = false } = {}) {
       // The list really changed: offer one Undo (not for an undo, so it cannot loop).
       if (result.status.success && !undo) {
         lastChange = { type: command.type, item: command.item, list: command.list };
+        undoButton.textContent = `Undo (${command.type === "add" ? "remove" : "add back"} ${command.item})`;
         undoButton.hidden = false;
       }
     }

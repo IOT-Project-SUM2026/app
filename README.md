@@ -1,5 +1,9 @@
 # Smart Display
 
+Phone app and server of the **Smart Display** project (Technion IoT course 236333).
+The ESP32 display firmware is in the other repository:
+https://github.com/IOT-Project-SUM2026/dispaly
+
 Run `npm install`, configure `.env`, then run `npm start` and open http://127.0.0.1:3000.
 
 Required environment variables: `GEMINI_API_KEY`, `FIREBASE_DATABASE_URL`, and
@@ -8,74 +12,47 @@ account JSON, stored outside this directory) or `FIREBASE_SERVICE_ACCOUNT`
 (production: the JSON contents as a secret). Firebase can stay in locked mode:
 only the backend uses the Admin SDK.
 
-Hold the button to record, then release. The app asks Gemini to interpret the audio and shows
-the action, item, and list. There is no confirmation step: once the command is understood and
-validated, it is sent immediately. The validated result is written to
-`/command` as `{ "type": "add", "item": "tomato", "list": "shopping", "runningCount": 1 }`.
-Commands can target either list: for example, “add tomatoes to my shopping list” uses
-`"list": "shopping"`, while “add call the dentist to my to-do list” uses `"list": "todo"`.
-Other list names are rejected before anything is written to Firebase; the app asks the user
-to choose the shopping list or to-do list ("There are two lists: shopping and to-do.").
-The model is instructed not to infer an action or list from an item name alone; incomplete
-commands are rejected with a prompt to say the action and list.
-The counter increments atomically for every write, including repeated commands.
+Hold the button to record, then release (or tap **Type instead** and type the command). The
+server sends the recording, or the typed text, to Gemini with the same prompt, then checks the
+answer: there must be an explicit "add" or "remove", one item that was really said, and a named
+list ("shopping" or "to-do"). Anything else is rejected with a message that says what to say
+instead, and nothing is written to Firebase. There is no confirmation step: a valid command is
+sent at once. "Add" for an item already on the list, and "remove" for an item that isn't, are
+answered without sending anything to the display.
 
-The app waits up to 60 seconds for `/status` containing the same numeric
-`runningCount`, a boolean `success`, and a message in `text`. Old confirmations
-are ignored. This correlation field is an extension to the original brief and
-must also be written by the final ESP32 firmware.
+## How the app and the display talk (Firebase Realtime Database)
+
+| Path | Written by | Content |
+|---|---|---|
+| `/commands/<pushId>` | server | `{type, item, list, createdAt, runningCount}`: one entry per command (a Firebase push id, so two phones never overwrite each other) |
+| `/status/<pushId>` | display | `{success, changed, text, at}`: the display's reply, e.g. "Added milk to your shopping list"; the display removes `/commands/<pushId>` in the same request |
+| `/device` | display | `lastSeen` (server time, every 10 s) and `protocol` (2) |
+| `/lists` | display | `{shopping: [...], todo: [...]}`: the lists after every change |
+
+The server waits up to 60 s for `/status/<pushId>`, returns it to the app and deletes it.
+Replies nobody read are removed after 10 minutes.
+
+**Display off or offline.** If `/device/lastSeen` is more than 25 seconds old, the server answers
+the app at once, like an online display, checking duplicates and removals against `/lists` plus
+the commands still waiting in `/commands`. The command stays in the queue and the display applies
+it when it is back. The app shows "Display offline since 17:05" above the button.
+
+**Undo.** After a command that changed a list, the app offers "Undo (remove milk)". It sends the
+opposite command without a recording, through the same checks and queue.
+
+`/command` (a single "latest command" slot with `runningCount`) is still written for older
+displays; the current firmware doesn't use it.
 
 ## Test without the ESP32
 
-Speak a command and check `/command` in the Firebase console. While the app is
-waiting, add or edit `/status` to contain:
-
-```json
-{
-  "runningCount": 1,
-  "success": true,
-  "text": "Simulated confirmation: tomato added"
-}
-```
-
-Use the actual number from `/command`, and save within the 60-second waiting
-window. This simulates an acknowledgement; it does not update a physical device.
-The app should show `Confirmed`. Setting `success` to false tests a device error.
-Without a response it reports a timeout, leaving the command in Firebase.
-
-**Command queue (several phones at once).** Every confirmed command is also stored in
-its own place in `/commands/<pushId>` (a Firebase push id) as
-`{ "type": "add", "item": "milk", "list": "shopping", "runningCount": 7, "createdAt": … }`,
-so two phones sending at the same moment never overwrite each other. The display should
-read `/commands` and answer each command by writing `{ "success": true, "text": "…" }` to
-`/commands/<pushId>/status`; each phone only waits for the reply to its own command.
-`/command` still holds the latest command and `/status` is still understood
-(matched by `runningCount`) for a display that only supports the original slots, but
-such a display can overwrite replies when two phones send at once.
-
-**Display off or offline.** The display writes the current time (Firebase server timestamp,
-epoch milliseconds, for example `{".sv": "timestamp"}`) to `/device/lastSeen` every 10 seconds.
-If that value is more than 25 seconds old, the server answers the app at once, like an
-online display ("Added milk to your shopping list"), checking duplicates and removals against
-`/lists` plus the commands still waiting in `/commands`. The command stays in the
-`/commands` queue; when the display is back it must apply every entry that has no `status`
-yet, in `runningCount` order, and write `{ "success": true, "text": "…" }` to
-`/commands/<pushId>/status`. A display that never writes `/device/lastSeen` (or writes a
-value that is not a clock time) is assumed to be online, so the old behaviour is kept.
-The display-side code (`firebase_sync.h`) belongs to the ESP32 firmware, not to this app.
-
-**Undo.** After a command that really changed a list, the app shows an Undo button. It
-sends the opposite command (add ↔ remove) without a recording, through the same checks and
-queue as a voice command. It is not offered when the list did not change (already on the
-list, display error, no reply) and cannot be undone again.
-
-Before connecting
-the team's device, agree on its exact fields and access rules. Change the database
-URL and credentials in `.env` and restart when moving to the team's project.
+Send a command, then in the Firebase console add `/status/<pushId>` (the id of the new entry
+under `/commands`) = `{"success": true, "text": "Simulated: milk added"}` within 60 seconds:
+the app shows that text. `"success": false` tests a display error. If `/device/lastSeen` is
+older than 25 seconds, the server answers at once as for an offline display.
 
 Run `npm test` for local protocol tests. `node check-firebase.js` tests real Firebase
 access using a temporary `_integrationChecks` child, then removes that child.
-It does not write to the real `/command` or `/status` paths.
+It does not write to the real `/commands`, `/status` or `/lists` paths.
 
 ## Deploy (single Railway service: app + server together)
 
