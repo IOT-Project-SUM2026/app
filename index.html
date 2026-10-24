@@ -46,7 +46,7 @@
   </main>
   <script>
     window.API_BASE = ["localhost", "127.0.0.1"].includes(location.hostname)
-      ? "http://localhost:3000"
+      ? (location.port === "3000" ? "" : "http://localhost:3000")
       : "https://iot-project-sum2026-production.up.railway.app";
   </script>
   <script src="app.js"></script>

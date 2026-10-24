@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { validateCommand, nextCommand, waitForStatus } from "./commands.js";
+import {
+  validateCommand, nextCommand, waitForStatus, verifyTranscript, checkRemoval, applyListChange
+} from "./commands.js";
 
 function fakeRef() {
   let handler;
@@ -29,6 +31,33 @@ test("validates commands before mapping them to the device format", () => {
     /whether to add or remove/);
   assert.throws(() => validateCommand({ action: "add", item: "Chico", list: null }),
     /shopping list or to-do list/);
+});
+
+test("rejects commands the user did not actually say", () => {
+  const add = { type: "add", item: "milk", list: "shopping" };
+  assert.deepEqual(verifyTranscript("Add milk to my shopping list", add), add);
+  assert.throws(() => verifyTranscript("bro", { type: "add", item: "bro", list: "shopping" }));
+  assert.throws(() => verifyTranscript("milk", add));
+  assert.throws(() => verifyTranscript("add milk", add));
+  assert.throws(() => verifyTranscript("remove milk from my shopping list", add));
+  verifyTranscript("ajoute du lait à ma liste de courses", { type: "add", item: "lait", list: "shopping" });
+  verifyTranscript("add call the dentist to my to-do list", { type: "add", item: "call the dentist", list: "todo" });
+});
+
+test("removing a missing item is refused; lists stay in sync", () => {
+  const remove = { type: "remove", item: "Milk", list: "shopping" };
+  assert.match(checkRemoval(null, remove), /not on your shopping list/);
+  assert.match(checkRemoval(null, { ...remove, item: "shoes", list: "todo" }), /not on your to-do list/);
+  assert.equal(checkRemoval(null, { type: "add", item: "milk", list: "todo" }), null);
+  const display = ["cooking", "call my mom", "הליכה"];
+  assert.equal(checkRemoval(display, { type: "remove", item: "Call my mom", list: "todo" }), null);
+  assert.equal(checkRemoval(display, { type: "remove", item: "הליכה", list: "todo" }), null);
+  assert.match(checkRemoval(display, { type: "remove", item: "shoes", list: "todo" }), /not on your to-do list/);
+  assert.match(checkRemoval(display, { type: "remove", item: "ריצה", list: "todo" }), /not on your to-do list/);
+  let stored = applyListChange(null, { type: "add", item: "milk", list: "shopping" });
+  assert.equal(checkRemoval(stored, remove), null);
+  stored = applyListChange(stored, remove);
+  assert.match(checkRemoval(stored, remove), /not on your shopping list/);
 });
 
 test("identical commands receive increasing numbers; invalid counters are rejected", () => {

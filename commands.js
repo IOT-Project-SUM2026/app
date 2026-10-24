@@ -15,6 +15,60 @@ export function validateCommand(value) {
   return { type, item: value.item.trim(), list: value.list };
 }
 
+const strip = (text) => String(text ?? "").toLowerCase().normalize("NFD")
+  .replace(/\p{M}/gu, "").replace(/[^\p{L}\p{N} ]+/gu, " ").replace(/\s+/g, " ").trim();
+
+// /lists/<name> may be a plain array maintained by the display, or our own { items } object.
+export function storedItems(stored) {
+  if (Array.isArray(stored)) return stored;
+  return Array.isArray(stored?.items) ? stored.items : [];
+}
+
+export function normalizeItem(item) {
+  return strip(item);
+}
+
+const ACTION_WORDS = {
+  add: /\b(add|put|ajoute\w*|rajoute\w*|mets?|met)\b/,
+  remove: /\b(remove|delete|take off|take out|clear|retire\w*|enleve\w*|supprime\w*|efface\w*)\b/
+};
+const LIST_WORDS = {
+  shopping: /\b(shopping|groceries|grocery|courses)\b/,
+  todo: /\b(to ?do|task|tasks|tache|taches|a faire)\b/
+};
+
+// The model must prove what it heard: the transcript has to contain an explicit
+// action word, an explicit list name and the item. Prevents "bro" -> add.
+export function verifyTranscript(transcript, command) {
+  const heard = strip(transcript);
+  const itemWords = strip(command.item).split(" ").filter(Boolean);
+  if (!heard || !ACTION_WORDS[command.type].test(heard) ||
+      !LIST_WORDS[command.list].test(heard) || !itemWords.every((word) => heard.includes(word))) {
+    throw new Error("Please say the action, the item and the list, for example: add milk to my shopping list.");
+  }
+  return command;
+}
+
+export function listHasItem(stored, item) {
+  const key = normalizeItem(item);
+  return Boolean(key) && storedItems(stored).some((entry) => normalizeItem(entry) === key);
+}
+
+// Returns an error message when a removal targets an item known to be missing.
+export function checkRemoval(stored, command) {
+  if (command.type !== "remove") return null;
+  return listHasItem(stored, command.item)
+    ? null
+    : `“${command.item}” is not on your ${command.list === "todo" ? "to-do" : "shopping"} list.`;
+}
+
+export function applyListChange(stored, command) {
+  const key = normalizeItem(command.item);
+  const items = storedItems(stored).filter((entry) => normalizeItem(entry) !== key);
+  if (command.type === "add") items.push(command.item);
+  return { tracked: true, items };
+}
+
 export function nextCommand(current, command) {
   const previous = current?.runningCount ?? 0;
   if (!Number.isSafeInteger(previous) || previous < 0 || previous >= Number.MAX_SAFE_INTEGER) {

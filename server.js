@@ -6,7 +6,9 @@ import { GoogleGenAI } from "@google/genai";
 import { applicationDefault, cert, initializeApp } from "firebase-admin/app";
 import { getDatabase } from "firebase-admin/database";
 import { fileURLToPath } from "node:url";
-import { validateCommand, nextCommand, waitForStatus } from "./commands.js";
+import {
+  validateCommand, nextCommand, waitForStatus, verifyTranscript, checkRemoval, applyListChange
+} from "./commands.js";
 
 dotenv.config();
 
@@ -25,13 +27,29 @@ const credential = process.env.FIREBASE_SERVICE_ACCOUNT
   : applicationDefault();
 initializeApp({ credential, databaseURL: process.env.FIREBASE_DATABASE_URL });
 const database = getDatabase();
+// Open the Firebase connection at startup so the first request is not slow.
+database.ref("lists").get().catch(() => {});
 
+// /lists/<name> is owned by the display (plain array) and is never written by this server.
+// Our own tracking lives in /appLists/<name>; /lists/<name> as { items } is a legacy copy.
+async function readList(name) {
+  const [display, mine] = await Promise.all([
+    database.ref(`lists/${name}`).get(), database.ref(`appLists/${name}`).get()
+  ]);
+  return { display: display.val(), mine: mine.val() };
+}
+
+async function removalError(command) {
+  if (command.type !== "remove") return null;
+  const { display, mine } = await readList(command.list);
+  return checkRemoval(Array.isArray(display) ? display : (mine ?? display), command);
+}
 // Serve only public assets, never .env or server credentials.
 for (const [route, file] of [["/", "index.html"], ["/app.js", "app.js"], ["/style.css", "style.css"],
   ["/pwa.js", "pwa.js"], ["/sw.js", "sw.js"], ["/manifest.webmanifest", "manifest.webmanifest"],
   ...[180, 192, 512].map((size) => [`/icons/icon-${size}.png`, `icons/icon-${size}.png`])]) {
   app.get(route, (_req, res) => {
-    res.set("Cache-Control", "no-cache");
+    res.set("Cache-Control", route.startsWith("/icons/") ? "public, max-age=86400" : "no-cache");
     res.sendFile(fileURLToPath(new URL(file, import.meta.url)));
   });
 }
@@ -53,6 +71,11 @@ app.use(
   })
 );
 
+app.get("/api/health", (_req, res) => {
+  res.set("Cache-Control", "no-store");
+  res.json({ ok: true });
+});
+
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 }
@@ -71,7 +94,7 @@ async function generateWithRetry(request, retries = 3) {
         console.log(`Gemini busy. Retry ${attempt}/${retries}...`);
 
         await new Promise((resolve) => {
-          setTimeout(resolve, 2000);
+          setTimeout(resolve, 700);
         });
 
         continue;
@@ -126,9 +149,13 @@ For example, "add milk to my shopping list" means action "add", item "milk", lis
 Do not guess between the two lists. If the user names any other list, return that list name
 as the "list" value exactly as heard; the command will be rejected and the user can try again.
 
+Also return "transcript": the exact words spoken, word for word, without adding anything.
+If the audio is unclear, silent or is not a command, return null for action, item and list.
+
 Return ONLY valid JSON in this exact format:
 
 {
+  "transcript": "<exact words heard>",
   "action": "add", "remove", or null,
   "item": "<item name>",
   "list": "shopping", "todo", the unsupported list name, or null
@@ -147,7 +174,8 @@ Do not return explanations.
               }
             ]
           }
-        ]
+        ],
+        config: { temperature: 0, responseMimeType: "application/json" }
       });
 
       const cleanedText = (response.text ?? "")
@@ -161,11 +189,19 @@ Do not return explanations.
       } catch {
         return res.status(422).json({ error: "Could not understand a valid command. Please try again." });
       }
+      console.log("Gemini heard:", JSON.stringify(parsedCommand));
       let command;
       try {
         command = validateCommand(parsedCommand);
+        verifyTranscript(parsedCommand.transcript, command);
       } catch (error) {
+        console.log("Rejected:", error.message);
         return res.status(422).json({ error: error.message });
+      }
+      const missing = await removalError(command);
+      if (missing) {
+        console.log("Rejected:", missing);
+        return res.status(422).json({ error: missing });
       }
       res.json(command);
     } catch (error) {
@@ -192,6 +228,8 @@ app.post("/api/confirm-command", async (req, res) => {
   }
 
   try {
+    const missing = await removalError(command);
+    if (missing) return res.status(422).json({ error: missing });
     const result = await database.ref("command").transaction(
       (current) => nextCommand(current, command), undefined, false
     );
@@ -219,6 +257,24 @@ app.get("/api/command-status/:count", async (req, res) => {
   res.on("close", () => controller.abort());
   try {
     const status = await waitForStatus(database.ref("status"), count, { signal: controller.signal });
+    if (status?.success) {
+      // Keep our copy of the lists in sync once the display confirmed (idempotent).
+      try {
+        const sent = (await database.ref("command").get()).val();
+        if (sent?.runningCount === count && ["add", "remove"].includes(sent.type) &&
+            ["shopping", "todo"].includes(sent.list)) {
+          // If the display keeps its own array in /lists, it is the source of truth.
+          const own = (await database.ref(`lists/${sent.list}`).get()).val();
+          if (!Array.isArray(own)) {
+            await database.ref(`appLists/${sent.list}`).transaction(
+              (stored) => applyListChange(stored ?? own, sent)
+            );
+          }
+        }
+      } catch (error) {
+        console.error("List sync error:", error.code ?? error.name);
+      }
+    }
     if (!res.destroyed) res.json({ status });
   } catch {
     if (!res.destroyed) res.status(502).json({ error: "Unable to read display confirmation." });
