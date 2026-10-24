@@ -43,8 +43,22 @@ window. This simulates an acknowledgement; it does not update a physical device.
 The app should show `Confirmed`. Setting `success` to false tests a device error.
 Without a response it reports a timeout, leaving the command in Firebase.
 
-This prototype has one shared command slot, matching the brief. Use one client
-at a time; sending another command overwrites the previous slot. Before connecting
+**Command queue (several phones at once).** Every confirmed command is also stored in
+its own place in `/commands/<pushId>` (a Firebase push id) as
+`{ "type": "add", "item": "milk", "list": "shopping", "runningCount": 7, "createdAt": … }`,
+so two phones sending at the same moment never overwrite each other. The display should
+read `/commands` and answer each command by writing `{ "success": true, "text": "…" }` to
+`/commands/<pushId>/status`; each phone only waits for the reply to its own command.
+`/command` still holds the latest command and `/status` is still understood
+(matched by `runningCount`) for a display that only supports the original slots, but
+such a display can overwrite replies when two phones send at once.
+
+**Undo.** After a command that really changed a list, the app shows an Undo button. It
+sends the opposite command (add ↔ remove) without a recording, through the same checks and
+queue as a voice command. It is not offered when the list did not change (already on the
+list, display error, no reply) and cannot be undone again.
+
+Before connecting
 the team's device, agree on its exact fields and access rules. Change the database
 URL and credentials in `.env` and restart when moving to the team's project.
 

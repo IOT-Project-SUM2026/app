@@ -1,6 +1,9 @@
 const SILENCE_MESSAGE = "I didn't hear anything. Hold the button while you speak.";
+const OFFLINE_MESSAGE = "You’re offline. Connect to the internet to send voice commands.";
 const MIN_RECORDING_MS = 500;
 const recordButton = document.getElementById("recordButton");
+const undoButton = document.getElementById("undoButton");
+let lastChange = null;
 const statusText = document.getElementById("status");
 const apiBase = window.API_BASE ?? (
   ["localhost", "127.0.0.1"].includes(location.hostname) ? "http://localhost:3000" : ""
@@ -36,13 +39,14 @@ function showState(state, message) {
 async function startRecording() {
   if (busy || requestingMicrophone || recorder?.state === "recording") return;
   if (!navigator.onLine) {
-    showState("error", "You’re offline. Connect to the internet to record a command.");
+    showState("error", OFFLINE_MESSAGE);
     return;
   }
   if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
     showState("error", "Open this app over HTTPS in Safari or Chrome to use your microphone.");
     return;
   }
+  hideUndo();
   holding = true;
   requestingMicrophone = true;
   showState("opening", "Your microphone is only used while you record.");
@@ -110,15 +114,48 @@ async function sendAudio(blob) {
     if (!response.ok) throw new Error(command.error || "Could not understand the command.");
     await sendCommand(command);
   } catch (error) {
-    showState(error.name === "TimeoutError" ? "timeout" : "error", error.name === "TimeoutError"
-      ? "Request timed out. Check your list before trying again."
-      : error.message);
+    showRequestError(error);
   }
 }
 
+// Timeouts, a lost connection (fetch throws TypeError) and server messages look different.
+function showRequestError(error) {
+  if (error.name === "TimeoutError") {
+    showState("timeout", "Request timed out. Check your list before trying again.");
+  } else if (!navigator.onLine || error instanceof TypeError) {
+    showState("error", OFFLINE_MESSAGE);
+  } else {
+    showState("error", error.message);
+  }
+}
+
+// Undo: only offered after a command that really changed the list.
+function hideUndo() {
+  lastChange = null;
+  undoButton.hidden = true;
+}
+
+// Sends the opposite command without a recording. The server runs the same checks and the
+// same queue as for a voice command (for example, it refuses to remove an item that is gone).
+async function undoLastChange() {
+  if (!lastChange || busy) return;
+  const { type, item, list } = lastChange;
+  hideUndo();
+  busy = true;
+  recordButton.disabled = true;
+  try {
+    await sendCommand({ type: type === "add" ? "remove" : "add", item, list }, { undo: true });
+  } finally {
+    busy = false;
+    recordButton.disabled = false;
+  }
+}
+undoButton.addEventListener("click", undoLastChange);
+
 // Sends the understood command straight to the display (no confirmation step).
-async function sendCommand(draft) {
-  showState("processing", "Sending your command…");
+async function sendCommand(draft, { undo = false } = {}) {
+  hideUndo();
+  showState("processing", undo ? "Undoing…" : "Sending your command…");
   try {
     const response = await fetch(`${apiBase}/api/confirm-command`, {
       method: "POST",
@@ -128,12 +165,18 @@ async function sendCommand(draft) {
     });
     const command = await response.json();
     if (!response.ok) throw new Error(command.error || "Could not send the command.");
+    // Already on the list: nothing was sent to the display, and this still counts as success.
+    if (command.duplicate) {
+      showState("success", command.message);
+      return;
+    }
 
     recordButton.disabled = true;
     const listName = command.list === "todo" ? "to-do list" : "shopping list";
     const removing = command.type === "remove";
     showState("waiting", `${removing ? "Removing" : "Adding"} ${command.item} ${removing ? "from" : "to"} your ${listName}…`);
-    const confirmation = await fetch(`${apiBase}/api/command-status/${command.runningCount}`, {
+    // Wait for the reply to THIS command (its own queue entry), not to another phone's.
+    const confirmation = await fetch(`${apiBase}/api/command-status/${command.runningCount}?id=${encodeURIComponent(command.id)}`, {
       signal: AbortSignal.timeout(65000)
     });
     const result = await confirmation.json();
@@ -146,15 +189,23 @@ async function sendCommand(draft) {
       showState(result.status.success ? "success" : "error", result.status.success
         ? `${itemName} ${action} your ${listName}`
         : "Your display couldn’t complete this request. Check your list.");
+      // The list really changed: offer one Undo (not for an undo, so it cannot loop).
+      if (result.status.success && !undo) {
+        lastChange = { type: command.type, item: command.item, list: command.list };
+        undoButton.hidden = false;
+      }
     }
   } catch (error) {
-    showState(error.name === "TimeoutError" ? "timeout" : "error", error.name === "TimeoutError"
-      ? "Request timed out. Check your list before trying again."
-      : error.message);
+    showRequestError(error);
   } finally {
     recordButton.disabled = false;
   }
 }
+
+// Back online: clear the offline message so the user can record again.
+window.addEventListener("online", () => {
+  if (statusText.textContent === OFFLINE_MESSAGE && !busy) showState("idle", "");
+});
 
 recordButton.addEventListener("pointerdown", (event) => {
   if (event.button !== 0 || busy || requestingMicrophone) return;

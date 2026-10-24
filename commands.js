@@ -38,8 +38,44 @@ const FILLER_WORDS = new Set([
 
 export const NEGATION_MESSAGE = "Nothing was changed.";
 
+export const BUSY_MESSAGE = "The voice service is busy right now. Please try again in a moment.";
+export const GEMINI_TIMEOUT_MS = 20000;
+
+// Runs `task(signal)` but gives up after `ms` (default 20 s): the call is cancelled through
+// the signal and the result is a GEMINI_TIMEOUT error, so the app never waits forever.
+export async function withTimeout(task, ms = GEMINI_TIMEOUT_MS) {
+  const controller = new AbortController();
+  let timer;
+  const timeout = new Promise((_resolve, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(Object.assign(new Error("The voice service did not answer in time."), { code: "GEMINI_TIMEOUT" }));
+    }, ms);
+  });
+  try {
+    return await Promise.race([task(controller.signal), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Runs `task`; while Gemini answers 503 (busy) it waits and retries, then gives up
+// and rethrows the 503 so the caller can report an error.
+export async function retryWhileBusy(task, { retries = 3, delayMs = 2000, sleep, onRetry } = {}) {
+  const wait = sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await task();
+    } catch (error) {
+      if (error?.status !== 503 || attempt > retries) throw error;
+      onRetry?.(attempt, retries);
+      await wait(delayMs);
+    }
+  }
+}
+
 export const SILENCE_MESSAGE = "I didn't hear anything. Hold the button while you speak.";
-export const UNCLEAR_MESSAGE = "I couldn't understand that.";
+export const UNCLEAR_MESSAGE = "Could not understand a valid command. Please try again.";
 
 // Runs before validation: silence, noise or a cut-off recording produce no words.
 export function checkHeard(parsed) {
@@ -65,8 +101,8 @@ export function checkHeard(parsed) {
 }
 
 export function validateCommand(value) {
-  if (!value || typeof value !== "object") {
-    throw new Error("Could not understand a valid command. Please try again.");
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(UNCLEAR_MESSAGE);
   }
   const type = value.action ?? value.type;
   if (!["add", "remove"].includes(type)) {
@@ -208,6 +244,13 @@ export function checkRemoval(stored, command) {
     : `“${command.item}” is not on your ${command.list === "todo" ? "to-do" : "shopping"} list.`;
 }
 
+// "add milk" twice: returns the message to show when the item is already on the list.
+// Matching ignores upper/lower case, accents and punctuation. No duplicate is created.
+export function checkDuplicate(stored, command) {
+  if (command.type !== "add" || !listHasItem(stored, command.item)) return null;
+  return `${command.item} is already on your ${command.list === "todo" ? "to-do" : "shopping"} list.`;
+}
+
 export function applyListChange(stored, command) {
   const key = normalizeItem(command.item);
   const items = storedItems(stored).filter((entry) => normalizeItem(entry) !== key);
@@ -223,12 +266,38 @@ export function nextCommand(current, command) {
   return { ...command, runningCount: previous + 1 };
 }
 
-export function waitForStatus(ref, runningCount, { timeoutMs = 60000, signal } = {}) {
+// Each command has its own place in the /commands queue (a Firebase push id), so two phones
+// sending at the same moment never overwrite each other. The display answers a command by
+// writing { success, text } to /commands/<id>/status. This adapter makes that private reply
+// look like the shared /status value for the same runningCount.
+export function commandStatusRef(ref, runningCount) {
+  const wrappers = new Map();
+  return {
+    on(event, callback, onError) {
+      const wrapper = (snapshot) => {
+        const value = snapshot.val();
+        callback({ val: () => (value && typeof value === "object" ? { runningCount, ...value } : value) });
+      };
+      wrappers.set(callback, wrapper);
+      ref.on(event, wrapper, onError);
+    },
+    off(event, callback) {
+      const wrapper = wrappers.get(callback);
+      wrappers.delete(callback);
+      if (wrapper) ref.off(event, wrapper);
+    }
+  };
+}
+
+// Waits for the display's reply to ONE command. `refs` can be one ref or several (for example the
+// command's own queue entry plus the old shared /status); the first matching reply wins.
+export function waitForStatus(refs, runningCount, { timeoutMs = 60000, signal } = {}) {
+  const sources = Array.isArray(refs) ? refs : [refs];
   return new Promise((resolve, reject) => {
     let timer;
     const finish = (error, value) => {
       clearTimeout(timer);
-      ref.off("value", onValue);
+      sources.forEach((source) => source.off("value", onValue));
       signal?.removeEventListener("abort", onAbort);
       if (error) reject(error);
       else resolve(value);
@@ -244,6 +313,9 @@ export function waitForStatus(ref, runningCount, { timeoutMs = 60000, signal } =
     if (signal?.aborted) return onAbort();
     timer = setTimeout(() => finish(null, null), timeoutMs);
     signal?.addEventListener("abort", onAbort, { once: true });
-    ref.on("value", onValue, (error) => finish(error));
+    sources.forEach((source) => source.on("value", onValue, (error) => finish(error)));
   });
 }
+
+// Firebase push ids are 20 characters from [-0-9A-Za-z_].
+export const isPushId = (value) => typeof value === "string" && /^[-\w]{20}$/.test(value);

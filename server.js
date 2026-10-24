@@ -4,11 +4,11 @@ import multer from "multer";
 import cors from "cors";
 import { GoogleGenAI } from "@google/genai";
 import { applicationDefault, cert, initializeApp } from "firebase-admin/app";
-import { getDatabase } from "firebase-admin/database";
+import { getDatabase, ServerValue } from "firebase-admin/database";
 import { fileURLToPath } from "node:url";
 import {
   validateCommand, nextCommand, waitForStatus, verifyTranscript, checkRemoval, applyListChange,
-  checkHeard, UNCLEAR_MESSAGE
+  checkHeard, checkDuplicate, UNCLEAR_MESSAGE, retryWhileBusy, BUSY_MESSAGE, withTimeout, commandStatusRef, isPushId
 } from "./commands.js";
 
 dotenv.config();
@@ -40,10 +40,21 @@ async function readList(name) {
   return { display: display.val(), mine: mine.val() };
 }
 
+// The display's own array wins when it keeps one; otherwise our tracked copy.
+async function currentList(name) {
+  const { display, mine } = await readList(name);
+  return Array.isArray(display) ? display : (mine ?? display);
+}
+
 async function removalError(command) {
   if (command.type !== "remove") return null;
-  const { display, mine } = await readList(command.list);
-  return checkRemoval(Array.isArray(display) ? display : (mine ?? display), command);
+  return checkRemoval(await currentList(command.list), command);
+}
+
+// "add milk" when milk is already there: nothing is written to the display.
+async function duplicateMessage(command) {
+  if (command.type !== "add") return null;
+  return checkDuplicate(await currentList(command.list), command);
 }
 // Serve only public assets, never .env or server credentials.
 for (const [route, file] of [["/", "index.html"], ["/app.js", "app.js"], ["/style.css", "style.css"],
@@ -86,24 +97,13 @@ const ai = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY
 });
 
-async function generateWithRetry(request, retries = 3) {
-  for (let attempt = 1; attempt <= retries; attempt++) {
-    try {
-      return await ai.models.generateContent(request);
-    } catch (error) {
-      if (error.status === 503 && attempt < retries) {
-        console.log(`Gemini busy. Retry ${attempt}/${retries}...`);
-
-        await new Promise((resolve) => {
-          setTimeout(resolve, 700);
-        });
-
-        continue;
-      }
-
-      throw error;
-    }
-  }
+// Gemini busy (503): retry 3 times, 2 seconds apart, then report an error.
+function generateWithRetry(request) {
+  // Every call is cancelled after 20 s, so the app never waits forever.
+  return retryWhileBusy(() => withTimeout((abortSignal) =>
+    ai.models.generateContent({ ...request, config: { ...request.config, abortSignal } })), {
+    onRetry: (attempt, retries) => console.log(`Gemini busy. Retry ${attempt}/${retries}...`)
+  });
 }
 
 app.post(
@@ -231,6 +231,9 @@ Do not return explanations.
         message: error.message
       });
 
+      if (error.status === 503 || error.code === "GEMINI_TIMEOUT") {
+        return res.status(503).json({ error: BUSY_MESSAGE });
+      }
       res.status(500).json({
         error: "Could not understand the voice command. Please try again."
       });
@@ -249,11 +252,22 @@ app.post("/api/confirm-command", async (req, res) => {
   try {
     const missing = await removalError(command);
     if (missing) return res.status(422).json({ error: missing });
+    const duplicate = await duplicateMessage(command);
+    if (duplicate) {
+      console.log("Already on the list:", duplicate);
+      return res.json({ ...command, duplicate: true, message: duplicate });
+    }
     const result = await database.ref("command").transaction(
       (current) => nextCommand(current, command), undefined, false
     );
     if (!result.committed) throw new Error("Command was not saved.");
-    res.json(result.snapshot.val());
+    const numbered = result.snapshot.val();
+    // The command also gets its own place in the /commands queue (a Firebase push id), so two
+    // phones sending at the same moment never overwrite each other. /command above is kept as
+    // the "latest command" slot for displays that only read that.
+    const entry = database.ref("commands").push();
+    await entry.set({ ...numbered, createdAt: ServerValue.TIMESTAMP });
+    res.json({ ...numbered, id: entry.key });
   } catch (error) {
     console.error("Confirmed command error:", {
       name: error.name,
@@ -271,15 +285,23 @@ app.get("/api/command-status/:count", async (req, res) => {
   if (!Number.isSafeInteger(count) || count < 1) {
     return res.status(400).json({ error: "Invalid command number." });
   }
+  const id = req.query.id;
+  if (id !== undefined && !isPushId(id)) {
+    return res.status(400).json({ error: "Invalid command id." });
+  }
   res.set("Cache-Control", "no-store");
   const controller = new AbortController();
   res.on("close", () => controller.abort());
   try {
-    const status = await waitForStatus(database.ref("status"), count, { signal: controller.signal });
+    // This phone only listens for the reply to ITS command: the private reply in its queue
+    // entry, or (older displays) the shared /status carrying the same runningCount.
+    const sources = [database.ref("status")];
+    if (id) sources.unshift(commandStatusRef(database.ref(`commands/${id}/status`), count));
+    const status = await waitForStatus(sources, count, { signal: controller.signal });
     if (status?.success) {
       // Keep our copy of the lists in sync once the display confirmed (idempotent).
       try {
-        const sent = (await database.ref("command").get()).val();
+        const sent = (await database.ref(id ? `commands/${id}` : "command").get()).val();
         if (sent?.runningCount === count && ["add", "remove"].includes(sent.type) &&
             ["shopping", "todo"].includes(sent.list)) {
           // If the display keeps its own array in /lists, it is the source of truth.
