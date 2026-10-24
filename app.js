@@ -11,11 +11,6 @@ let recordingTimer;
 const stateLabel = document.getElementById("stateLabel");
 const buttonTitle = document.getElementById("buttonTitle");
 const recordHint = document.getElementById("recordHint");
-const commandReview = document.getElementById("commandReview");
-const reviewCommand = document.getElementById("reviewCommand");
-const confirmCommandButton = document.getElementById("confirmCommand");
-const cancelCommandButton = document.getElementById("cancelCommand");
-let pendingCommand = null;
 // Wake the API (cold start) and open the connection while the user reads the page.
 fetch(`${apiBase}/api/health`, { cache: "no-store" }).catch(() => {});
 function showState(state, message) {
@@ -37,7 +32,7 @@ function showState(state, message) {
 }
 
 async function startRecording() {
-  if (busy || pendingCommand || requestingMicrophone || recorder?.state === "recording") return;
+  if (busy || requestingMicrophone || recorder?.state === "recording") return;
   if (!navigator.onLine) {
     showState("error", "You’re offline. Connect to the internet to record a command.");
     return;
@@ -71,7 +66,7 @@ async function startRecording() {
       recordButton.disabled = true;
       await sendAudio(new Blob(chunks, { type: current.mimeType }));
       busy = false;
-      recordButton.disabled = Boolean(pendingCommand);
+      recordButton.disabled = false;
     };
     current.start();
     recordingTimer = setTimeout(stopRecording, 30000);
@@ -105,15 +100,7 @@ async function sendAudio(blob) {
     });
     const command = await response.json();
     if (!response.ok) throw new Error(command.error || "Could not understand the command.");
-    const listName = command.list === "todo" ? "to-do list" : "shopping list";
-    pendingCommand = command;
-    const action = command.type === "remove" ? "Remove" : "Add";
-    const relation = command.type === "remove" ? "from" : "to";
-    reviewCommand.textContent = `${action} “${command.item}” ${relation} your ${listName}?`;
-    commandReview.hidden = false;
-    recordButton.disabled = true;
-    showState("confirm", "Nothing has been sent to your display yet.");
-    confirmCommandButton.focus();
+    await sendCommand(command);
   } catch (error) {
     showState(error.name === "TimeoutError" ? "timeout" : "error", error.name === "TimeoutError"
       ? "Request timed out. Check your list before trying again."
@@ -121,13 +108,9 @@ async function sendAudio(blob) {
   }
 }
 
-async function confirmCommand() {
-  if (!pendingCommand || busy) return;
-  busy = true;
-  confirmCommandButton.disabled = true;
-  cancelCommandButton.disabled = true;
-  const draft = pendingCommand;
-  showState("processing", "Sending your confirmed command…");
+// Sends the understood command straight to the display (no confirmation step).
+async function sendCommand(draft) {
+  showState("processing", "Sending your command…");
   try {
     const response = await fetch(`${apiBase}/api/confirm-command`, {
       method: "POST",
@@ -138,10 +121,6 @@ async function confirmCommand() {
     const command = await response.json();
     if (!response.ok) throw new Error(command.error || "Could not send the command.");
 
-    pendingCommand = null;
-    commandReview.hidden = true;
-    confirmCommandButton.disabled = false;
-    cancelCommandButton.disabled = false;
     recordButton.disabled = true;
     const listName = command.list === "todo" ? "to-do list" : "shopping list";
     const removing = command.type === "remove";
@@ -161,34 +140,13 @@ async function confirmCommand() {
         : "Your display couldn’t complete this request. Check your list.");
     }
   } catch (error) {
-    if (pendingCommand) {
-      pendingCommand = null;
-      commandReview.hidden = true;
-      showState("error", "Could not confirm whether the command was sent. Check your list before trying again.");
-    } else {
-      showState(error.name === "TimeoutError" ? "timeout" : "error", error.name === "TimeoutError"
-        ? "Request timed out. Check your list before trying again."
-        : error.message);
-    }
+    showState(error.name === "TimeoutError" ? "timeout" : "error", error.name === "TimeoutError"
+      ? "Request timed out. Check your list before trying again."
+      : error.message);
   } finally {
-    busy = false;
-    confirmCommandButton.disabled = false;
-    cancelCommandButton.disabled = false;
-    recordButton.disabled = Boolean(pendingCommand);
+    recordButton.disabled = false;
   }
 }
-
-function cancelCommand() {
-  if (!pendingCommand || busy) return;
-  pendingCommand = null;
-  commandReview.hidden = true;
-  showState("idle", "Canceled. Nothing was sent to your display.");
-  recordButton.disabled = false;
-  recordButton.focus();
-}
-
-confirmCommandButton.addEventListener("click", confirmCommand);
-cancelCommandButton.addEventListener("click", cancelCommand);
 
 recordButton.addEventListener("pointerdown", (event) => {
   if (event.button !== 0 || busy || requestingMicrophone) return;
