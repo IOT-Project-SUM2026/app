@@ -1,8 +1,10 @@
-const CACHE = "smart-display-shell-v8";
+const CACHE = "smart-display-shell-v9";
 const SHELL = ["/", "/style.css", "/app.js", "/pwa.js", "/manifest.webmanifest",
   "/icons/icon-180.png", "/icons/icon-192.png", "/icons/icon-512.png"];
 
 self.addEventListener("install", (event) => {
+  // A new version takes over at once (no need to close every tab of the app first).
+  self.skipWaiting();
   event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(SHELL)));
 });
 

@@ -348,7 +348,7 @@ function fillList(element, items) {
     const li = document.createElement("li");
     li.textContent = name ?? "Empty";
     if (name === null) li.className = "empty";
-    else li.dir = "auto";  // Hebrew items right-to-left
+    else li.dir = "auto";  // Hebrew letters in the right order (rows stay left-aligned)
     return li;
   }));
 }
@@ -359,6 +359,8 @@ async function loadLists() {
     if (!response.ok) throw new Error(lists.error || "Couldn’t load your lists right now.");
     fillList(document.getElementById("shoppingList"), lists.shopping);
     fillList(document.getElementById("todoList"), lists.todo);
+    document.getElementById("shoppingCount").textContent = lists.shopping.length;
+    document.getElementById("todoCount").textContent = lists.todo.length;
     listsNote.textContent = displayStatus.dataset.online === "false"
       ? "Includes changes the display will make when it reconnects." : "";
   } catch (error) {
@@ -369,6 +371,6 @@ async function loadLists() {
 listsToggle.addEventListener("click", () => {
   listsBody.hidden = !listsBody.hidden;
   listsToggle.setAttribute("aria-expanded", String(!listsBody.hidden));
-  listsToggle.textContent = listsBody.hidden ? "Show my lists" : "Hide my lists";
+
   if (!listsBody.hidden) loadLists();
 });

@@ -21,41 +21,51 @@
   <p id="installHelp" class="app-notice" hidden>In Safari, open Share → Add to Home Screen → Add.</p>
   <p id="offlineNotice" class="app-notice" role="status" hidden>You’re offline. Connect to the internet to send voice commands.</p>
   <main aria-label="Voice control">
-    <span class="state-label" id="stateLabel">Ready</span>
     <p id="displayStatus" class="display-status" role="status" aria-live="polite"></p>
+    <span class="visually-hidden" id="stateLabel">Ready</span>
     <div class="voice-stage">
       <div class="halo" aria-hidden="true"></div>
       <div class="orbit" aria-hidden="true"></div>
-          <button id="recordButton" aria-label="Hold to speak; release to send" aria-describedby="recordHint">
-            <svg class="mic-icon" viewBox="0 0 48 48" fill="none" aria-hidden="true"><rect x="17" y="6" width="14" height="25" rx="7" stroke="currentColor" stroke-width="2.5"/><path d="M11 23v2a13 13 0 0 0 26 0v-2M24 38v6M18 44h12" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/></svg>
-            <svg class="check-icon" viewBox="0 0 48 48" fill="none" aria-hidden="true"><path d="m12 25 8 8 17-19" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            <span class="wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
-          </button>
+      <button id="recordButton" aria-label="Hold to speak; release to send" aria-describedby="recordHint">
+        <svg class="mic-icon" viewBox="0 0 48 48" fill="none" aria-hidden="true"><rect x="17" y="6" width="14" height="25" rx="7" stroke="currentColor" stroke-width="2.5"/><path d="M11 23v2a13 13 0 0 0 26 0v-2M24 38v6M18 44h12" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/></svg>
+        <svg class="check-icon" viewBox="0 0 48 48" fill="none" aria-hidden="true"><path d="m12 25 8 8 17-19" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span class="wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+      </button>
     </div>
     <h1 id="buttonTitle">Hold to speak</h1>
     <p id="recordHint">Add or remove an item with your voice.<br>Release to send.</p>
     <div class="feedback" role="status" aria-live="polite" aria-atomic="true"><p id="status"></p></div>
     <button id="undoButton" class="undo-button" type="button" hidden>Undo</button>
-    <button id="typeToggle" class="link-button" type="button" aria-expanded="false" aria-controls="typeForm">Type instead</button>
-    <form id="typeForm" class="type-form" hidden>
-      <label for="typeInput" class="visually-hidden">Command</label>
-      <input id="typeInput" type="text" maxlength="200" autocomplete="off" enterkeyhint="send" dir="auto"
-             placeholder="Add milk to my shopping list">
-      <button type="submit">Send</button>
-    </form>
-    <section class="lists-panel" aria-label="Your lists">
-      <button id="listsToggle" class="link-button" type="button" aria-expanded="false" aria-controls="listsBody">Show my lists</button>
-      <div id="listsBody" class="lists-body" hidden>
-        <div class="list-column"><h2>Shopping</h2><ul id="shoppingList"></ul></div>
-        <div class="list-column"><h2>To-do</h2><ul id="todoList"></ul></div>
-        <p id="listsNote" class="lists-note"></p>
-      </div>
-    </section>
-    <form id="codeForm" class="code-form" hidden>
+    <form id="codeForm" class="panel code-form" hidden>
       <label for="codeInput">App code</label>
-      <input id="codeInput" type="password" autocomplete="current-password" required maxlength="64">
-      <button type="submit">Save</button>
+      <div class="field-row">
+        <input id="codeInput" type="password" autocomplete="current-password" required maxlength="64">
+        <button type="submit">Save</button>
+      </div>
     </form>
+    <div class="actions">
+      <button id="typeToggle" class="action-button" type="button" aria-expanded="false" aria-controls="typeForm">
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="2.5" y="6" width="19" height="12" rx="2.5" stroke="currentColor" stroke-width="1.6"/><path d="M6 10h.01M9 10h.01M12 10h.01M15 10h.01M18 10h.01M8 14h8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        <span>Type instead</span>
+      </button>
+      <button id="listsToggle" class="action-button" type="button" aria-expanded="false" aria-controls="listsBody">
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M9 7h11M9 12h11M9 17h11" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M4.5 7h.01M4.5 12h.01M4.5 17h.01" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></svg>
+        <span class="label">My lists</span>
+      </button>
+    </div>
+    <form id="typeForm" class="panel type-form" hidden>
+      <label for="typeInput" class="visually-hidden">Command</label>
+      <div class="field-row">
+        <input id="typeInput" type="text" maxlength="200" autocomplete="off" enterkeyhint="send" dir="auto"
+               placeholder="Add milk to shopping list">
+        <button type="submit">Send</button>
+      </div>
+    </form>
+    <section id="listsBody" class="panel lists-body" aria-label="Your lists" hidden>
+      <div class="list-column"><h2>Shopping <span id="shoppingCount" class="count"></span></h2><ul id="shoppingList"></ul></div>
+      <div class="list-column"><h2>To-do <span id="todoCount" class="count"></span></h2><ul id="todoList"></ul></div>
+      <p id="listsNote" class="lists-note"></p>
+    </section>
     <p class="keyboard-hint">You can also hold <kbd>Space</kbd> when the button is focused.</p>
   </main>
   <script>
